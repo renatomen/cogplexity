@@ -523,9 +523,14 @@ test("scoring terminates and is unchanged when every node carries a parent back-
   assert.deepEqual(score(ast, text), plain);
 });
 
-test("a Svelte root is rejected with a message naming the later unit", () => {
+test("a Svelte-shaped root with an empty script and no markup returns an empty template facet and total 0", () => {
   const svelteRoot = { type: "Program", body: [{ type: "SvelteScriptElement", body: [] }], sourceType: "module" };
-  assert.throws(() => score(svelteRoot, ""), /Svelte roots are handled in a later unit/);
+  assert.deepEqual(score(svelteRoot, ""), {
+    functions: [],
+    topLevel: { kind: "topLevel", score: 0, increments: [] },
+    template: { kind: "template", score: 0, increments: [] },
+    total: 0,
+  });
 });
 
 test("a scope manager without a scopes array is rejected", () => {

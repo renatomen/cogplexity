@@ -1,5 +1,5 @@
 // Internal subtree walker for the Cognitive Complexity scoring core. Not part of the public
-// API: `src/score.js` (and later `src/svelte.js`) import it; the `exports` map hides it.
+// API: `src/score.js` and `src/svelte.js` import it; the `exports` map hides it.
 //
 // Every rule here is implemented from G. Ann Campbell, "Cognitive Complexity" v1.7, Appendix B
 // (the specification) and Appendix A (the JavaScript compensating usage). See PROVENANCE.md.
@@ -141,7 +141,7 @@ const KEYS = {
 
 // --- node helpers ----------------------------------------------------------------------
 
-function isNode(value) {
+export function isNode(value) {
   return value !== null && typeof value === "object" && typeof value.type === "string";
 }
 
@@ -165,7 +165,7 @@ function functionValue(node) {
 }
 
 /** Own child nodes of `node`, from the key table or the generic fallback. */
-function* children(node) {
+export function* children(node) {
   const keys = KEYS[node.type] ?? Object.keys(node);
   for (const key of keys) {
     if (SKIP_KEYS.has(key)) {
@@ -515,7 +515,7 @@ function stronglyConnected(count, edges) {
   return component;
 }
 
-function byPosition(a, b) {
+export function byPosition(a, b) {
   return a.loc.start.line - b.loc.start.line || a.loc.start.column - b.loc.start.column;
 }
 
@@ -537,6 +537,8 @@ export class Walker {
     this.chains = [];
     /** Frames of the functions lexically enclosing the current node. */
     this.frames = [];
+    /** Functions-in-markup mode (KTD2): a function raises nesting but opens no entry. */
+    this.markup = false;
     this.entryByNode = new Map();
     this.scope = null;
     this.references = referenceMap(options.scopeManager);
@@ -602,6 +604,20 @@ export class Walker {
     }
   }
 
+  /**
+   * KTD2's attribution contract for the Svelte facet: everything emitted while `body` runs
+   * accrues to `entry` alone, and with `markup` set a function raises nesting for its contents
+   * without opening an entry (KTD4's method-like inline function).
+   */
+  withAttribution(entry, markup, body) {
+    const saved = { chain: this.chain, markup: this.markup };
+    this.chain = [entry];
+    this.markup = markup;
+    body();
+    this.chain = saved.chain;
+    this.markup = saved.markup;
+  }
+
   // --- traversal -------------------------------------------------------------------------
 
   visit(node, nesting) {
@@ -651,6 +667,10 @@ export class Walker {
    * `this` means inside it.
    */
   visitFunction(node, nesting, hint = {}) {
+    if (this.markup) {
+      this.visitInlineFunction(node, nesting);
+      return;
+    }
     const parentFrame = this.frames[this.frames.length - 1];
     // Appendix A: a declarative container does not nest its functions; they become roots.
     const isRoot = parentFrame === undefined || parentFrame.declarative;
@@ -673,21 +693,30 @@ export class Walker {
       this.thisContext = hint.thisContext ?? null;
     }
     this.frames.push({ index, entry, node, declarative: isDeclarative(node) });
-    const inner = isRoot ? 0 : nesting + 1;
-    this.withScope(
-      (scope) => this.declareFunctionScope(scope, node),
-      () => {
-        this.visitAll(node.params ?? [], inner);
-        if (Array.isArray(node.body)) {
-          this.visitAll(node.body, inner);
-        } else {
-          this.visit(node.body, inner);
-        }
-      },
-    );
+    this.visitFunctionContents(node, isRoot ? 0 : nesting + 1);
     this.frames.pop();
     this.chain = saved.chain;
     this.thisContext = saved.thisContext;
+  }
+
+  /** Functions-in-markup mode: +0, no entry, contents one level deeper (KTD4). */
+  visitInlineFunction(node, nesting) {
+    this.visitFunctionContents(node, nesting + 1);
+  }
+
+  /** Parameters and body in the function's own scope; `nesting` is the level inside it. */
+  visitFunctionContents(node, nesting) {
+    this.withScope(
+      (scope) => this.declareFunctionScope(scope, node),
+      () => {
+        this.visitAll(node.params ?? [], nesting);
+        if (Array.isArray(node.body)) {
+          this.visitAll(node.body, nesting);
+        } else {
+          this.visit(node.body, nesting);
+        }
+      },
+    );
   }
 
   nameLoc(node, hint) {
@@ -894,6 +923,15 @@ export class Walker {
     }
   }
 
+  /** Score recursion and return the function entries and the top-level entry, increments in source order. */
+  finish() {
+    this.scoreRecursion();
+    for (const entry of [...this.functions, this.topLevel]) {
+      entry.increments.sort(byPosition);
+    }
+    return { functions: this.functions, topLevel: this.topLevel };
+  }
+
   // --- naming owners and `this` contexts ---------------------------------------------------
 
   visitDeclarator(node, nesting) {
@@ -1007,9 +1045,5 @@ for (const type of LOOP_TYPES) {
 export function walkProgram(program, sourceText, options = {}) {
   const walker = new Walker(sourceText, options);
   walker.visit(program, 0);
-  walker.scoreRecursion();
-  for (const entry of [...walker.functions, walker.topLevel]) {
-    entry.increments.sort(byPosition);
-  }
-  return { functions: walker.functions, topLevel: walker.topLevel };
+  return walker.finish();
 }
