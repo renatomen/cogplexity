@@ -1,0 +1,24 @@
+// Twenty points of top-level code and no function: the rule never reports topLevel (KTD7).
+const a = Date.now() > 0;
+let n = 0;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+if (a) n++;
+export { n };

@@ -1,10 +1,8 @@
-// Placeholder entry point. The rule, scoring function and config helper land in later units.
+// Package entry point (KTD11): the plugin object (default), the rule, the scoring function
+// and the flat-config scoping helper.
+import { plugin, scoped } from "./config.js";
+import { rule } from "./rule.js";
 import { score } from "./score.js";
 
-const plugin = {
-  meta: { name: "cogplexity", version: "0.0.1" },
-  rules: {},
-};
-
-export { plugin, score };
+export { plugin, rule, score, scoped };
 export default plugin;

@@ -1,5 +1,7 @@
 import js from "@eslint/js";
 
+import { scoped } from "./src/index.js";
+
 export default [
   { ignores: ["test/fixtures/**", "calibration/**", "node_modules/**"] },
   js.configs.recommended,
@@ -19,4 +21,6 @@ export default [
       },
     },
   },
+  // KTD13: the package lints itself with its own rule at threshold 15, under espree.
+  scoped(["src/**/*.js", "scripts/**/*.mjs", "test/**/*.js"], 15),
 ];
