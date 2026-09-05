@@ -41,6 +41,8 @@ export interface Increment {
   amount: number;
   nesting: number;
   loc: Location;
+  /** The operator of a `logicalSequence` run; absent on every other construct. */
+  operator?: "&&" | "||";
 }
 
 /**
@@ -52,6 +54,8 @@ export interface FunctionEntry {
   kind: "function";
   depth: number;
   parent: number | null;
+  /** Nesting level at which the body starts: 0 for a root, otherwise the level at the function's position plus one. */
+  nesting: number;
   loc: Location;
   nameLoc: Location;
   score: number;

@@ -63,7 +63,7 @@ import { score } from "cogplexity/score";
 const { functions, topLevel, template, total } = score(ast, sourceText, { scopeManager });
 ```
 
-`functions` holds one entry per function (`name`, `depth`, `parent`, `loc`, `nameLoc`, `score`, `increments`), `topLevel` the statements outside any function, `template` the Svelte template facet (Svelte roots only), and `total` the sum of the root functions and `topLevel`. Each increment is `{ construct, amount, nesting, loc }`; a function's score includes everything nested inside it.
+`functions` holds one entry per function (`name`, `depth`, `parent`, `nesting` — the level its body starts at — `loc`, `nameLoc`, `score`, `increments`), `topLevel` the statements outside any function, `template` the Svelte template facet (Svelte roots only), and `total` the sum of the root functions and `topLevel`. Each increment is `{ construct, amount, nesting, loc }`, plus `operator` (`&&` or `||`) on a `logicalSequence`; a function's score includes everything nested inside it.
 
 ## Options
 
@@ -117,7 +117,7 @@ So `{#if a}…{:else if b}…{:else}{#each xs as x}…{/each}{/if}` scores 1 + 1
 The specification is the authority; SonarCloud is a cross-check. The calibration harness (`test/calibration/`) proves two things about a public reference corpus analysed on SonarCloud, and passes only on **exact** equality:
 
 - **per-file totals** — `score().total` for every eligible file equals SonarCloud's `cognitive_complexity` file measure;
-- **per-function findings** — every root function scoring above 15 has a SonarCloud S3776 issue on its name line with the same score, and every S3776 issue corresponds to such a function.
+- **per-function findings** — every function whose *own-body* score exceeds 15 has a SonarCloud S3776 issue on its name line with that score, and every S3776 issue corresponds to such a function. The own-body score is what SonarCloud reports per function: the function's increments with nested functions excluded and nesting counted from the function's own body. The rule reports a root's inclusive score instead (the paper's attribution), so the harness derives Sonar's quantity from the same increments rather than comparing the rule's number.
 
 The corpus is [`renatomen/tasknotes-gantt`](https://github.com/renatomen/tasknotes-gantt) (SonarCloud project key `renatomen_obsidian-gantt`), a public repository chosen so this package never depends on private code; the harness is corpus-agnostic and accepts any fixture with the same shape.
 
@@ -139,12 +139,14 @@ node scripts/refresh-fixture.mjs tasknotes-gantt --project-key renatomen_obsidia
 
 The script aborts without touching the fixture on any API failure, replaces it atomically on success and prints what changed. The flags are only needed the first time; afterwards the metadata comes from the existing fixture.
 
-**Ledger.** A divergence from Sonar becomes a recorded entry in `calibration/ledger.json`, never a chase. Entries are `{ kind, match, reason, addedAt, expectedDelta? }`:
+**Ledger.** A divergence from Sonar becomes a recorded entry in `calibration/ledger.json`, never a chase. Entries are `{ kind, match, reason, addedAt, expectedDelta?, operator? }`:
 
-- `kind: "clause"` — `match` is a `construct` identifier (`recursion`, `logicalSequence`, …). It covers a file only when the file's delta (local minus Sonar) equals the summed amount of that construct's increments in the file, so `recursion` explains a `+1` only where exactly one recursion increment exists. A clause entry that covers no file fails the run as stale.
-- `kind: "file"` — `match` is the repo-relative path and `expectedDelta` (required) is **Sonar minus local**, i.e. the negation of the delta the report prints. The entry covers the file only when the observed delta equals `expectedDelta` exactly; a later regression on that file fails naming both deltas. A `file` entry also accepts that path's per-function mismatches — a `clause` entry never does.
+- `kind: "clause"` — `match` is a `construct` identifier (`recursion`, `logicalSequence`, …); a `logicalSequence` entry may add `operator` (`&&` or `||`) to name only those runs. Every clause entry naming at least one increment in a file must together explain the file's whole delta (local minus Sonar): `recursion` alone explains a `+1` only where exactly one recursion increment exists, and a file with both a recursion increment and a `||` run is covered only when the ledger carries both entries and the delta is their sum. The same entries explain a per-function mismatch when the root's score minus their increments equals Sonar's score, or is at most 15 where Sonar reported no issue. A clause entry that covers no file fails the run as stale.
+- `kind: "file"` — `match` is the repo-relative path and `expectedDelta` (required) is **Sonar minus local**, i.e. the negation of the delta the report prints. The entry covers the file only when the observed delta equals `expectedDelta` exactly; a later regression on that file fails naming both deltas. A `file` entry also accepts every per-function mismatch on that path.
 
 Every entry carries a one-line `reason`.
+
+**What the ledger records today.** SonarCloud counts sequences of `&&` but not of `||`, and does not increment for recursion; the specification counts both, so the rule keeps them and the ledger carries one `clause` entry each. SonarCloud also applies the paper's Appendix A test the way this package does — a root function with no structural increment of its own does not raise nesting for the functions inside it — except that, inside such a function, each function placed in a ternary leaks one extra nesting level for the rest of the root; the two corpus files showing that leak carry `file` entries.
 
 **Construct-presence report.** After scoring, the harness prints how many totals and issues it compared and whether the corpus contains at least one `recursion` increment and at least one Appendix A promoted root (a declarative outer function), e.g. `construct presence: recursion=yes declarativeOuter=no`. A question about Sonar's behaviour on a construct can only be recorded as answered when that construct is present.
 

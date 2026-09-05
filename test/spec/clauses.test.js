@@ -306,17 +306,24 @@ for (const mode of RESOLUTION_MODES) {
 
   test(`AE4 [${mode}]: a var hoisted out of a nested block resolves as the callee`, () => {
     const result = scoreSource("function h(): void { { var inner = function (): void { h(); }; } inner(); }", mode);
-    assert.deepEqual(shape(byName(result, "h")), [
-      ["recursion", 1, 0],
-      ["recursion", 1, 0],
-    ]);
+    assert.deepEqual(shape(byName(result, "h")), [["recursion", 1, 0]]);
     assert.deepEqual(shape(byName(result, "inner")), [["recursion", 1, 0]]);
   });
 
-  test(`AE4 [${mode}]: a callback inside a function that calls the function back puts the function in a cycle`, () => {
-    const result = scoreSource("function outer(xs: number[]): void { xs.forEach(() => outer(xs)); }", mode);
-    assert.deepEqual(shape(byName(result, "outer")), [["recursion", 1, 0]]);
+  test(`AE4 [${mode}]: a callback inside a non-declarative function that calls the function back puts the function in a cycle`, () => {
+    const result = scoreSource("function outer(xs: number[]): void { if (xs.length === 0) { return; } xs.forEach(() => outer(xs)); }", mode);
+    assert.deepEqual(shape(byName(result, "outer")), [
+      ["if", 1, 0],
+      ["recursion", 1, 0],
+    ]);
     assert.equal(byName(result, "<anonymous>").score, 0);
+  });
+
+  test(`AE4 [${mode}]: inside a declarative outer function the callback is promoted, so its call back is its own and no cycle forms`, () => {
+    const result = scoreSource("function outer(xs: number[]): void { xs.forEach(() => outer(xs)); }", mode);
+    assert.equal(byName(result, "outer").score, 0);
+    assert.equal(byName(result, "<anonymous>").score, 0);
+    assert.equal(byName(result, "<anonymous>").parent, null);
   });
 
   test(`AE4 [${mode}]: a call from a promoted function does not make its declarative container recursive`, () => {
@@ -331,8 +338,20 @@ for (const mode of RESOLUTION_MODES) {
 test("an if inside an arrow callback adds +2 (nesting 1) to the enclosing function", () => {
   const { result } = scoreFixture("nested-functions.ts");
   const fn = byName(result, "withCallback");
-  assert.equal(fn.score, 2);
-  assert.deepEqual(shape(fn), [["if", 2, 1]]);
+  assert.equal(fn.score, 3);
+  assert.deepEqual(shape(fn), [
+    ["if", 1, 0],
+    ["if", 2, 1],
+  ]);
+});
+
+test("a function entry records the nesting level its body starts at", () => {
+  const { result } = scoreFixture("nested-functions.ts");
+  assert.equal(byName(result, "withCallback").nesting, 0);
+  const outerIndex = result.functions.findIndex((fn) => fn.name === "withCallback");
+  assert.equal(result.functions[outerIndex + 1].nesting, 1);
+  const inLoop = scoreSource("function f(xs: number[][]): void { if (xs) { for (const row of xs) { row.forEach((x) => { void x; }); } } }");
+  assert.equal(byName(inLoop, "<anonymous>").nesting, 3);
 });
 
 test("the callback is its own entry with depth 1, parent pointing at the enclosing function, score 2", () => {
@@ -349,14 +368,15 @@ test("the callback is its own entry with depth 1, parent pointing at the enclosi
 
 test("total counts a nested function's increments once, through its root", () => {
   const result = scoreSource(readFixture("nested-functions.ts").split("export function classMembers")[0]);
-  assert.equal(result.total, 2);
+  assert.equal(result.total, 3);
 });
 
 test("a class field arrow value and a static block raise nesting and add nothing themselves", () => {
   const { result } = scoreFixture("nested-functions.ts");
   const fn = byName(result, "classMembers");
-  assert.equal(fn.score, 4);
+  assert.equal(fn.score, 5);
   assert.deepEqual(shape(fn), [
+    ["if", 1, 0],
     ["if", 2, 1],
     ["if", 2, 1],
   ]);
@@ -433,14 +453,72 @@ test("Appendix A: a declarative container holding a 4-point function reports 0 a
   assert.equal(total, 4);
 });
 
-test("Appendix A: return xs.map(x => x ? a : b) is not declarative and scores 2", () => {
-  const fn = byName(scoreFixture("declarative.ts").result, "mapsTernary");
-  assert.equal(fn.score, 2);
-  assert.deepEqual(shape(fn), [["ternary", 2, 1]]);
+/** The root promoted out of the named declarative container (Appendix A). */
+function promotedFrom(result, containerName) {
+  const container = byName(result, containerName);
+  const inside = (fn) => fn.loc.start.line > container.loc.start.line && fn.loc.end.line <= container.loc.end.line;
+  const promoted = result.functions.find((fn) => fn !== container && fn.parent === null && inside(fn));
+  assert.ok(promoted, `no promoted root inside ${containerName}`);
+  return promoted;
+}
+
+test("Appendix A: return xs.map(x => x ? a : b) is declarative — the arrow is promoted and the ternary scores 1", () => {
+  const { result } = scoreFixture("declarative.ts");
+  assert.equal(byName(result, "mapsTernary").score, 0);
+  const arrow = promotedFrom(result, "mapsTernary");
+  assert.equal(arrow.depth, 0);
+  assert.deepEqual(shape(arrow), [["ternary", 1, 0]]);
+});
+
+test("Appendix A: a top-level call is not a structural increment, so the function stays declarative", () => {
+  const { result } = scoreFixture("declarative.ts");
+  assert.equal(byName(result, "callsThenIterates").score, 0);
+  assert.deepEqual(shape(promotedFrom(result, "callsThenIterates")), [["if", 1, 0]]);
+});
+
+test("Appendix A: a top-level logical sequence is fundamental, not structural, so the function stays declarative", () => {
+  const { result } = scoreFixture("declarative.ts");
+  assert.deepEqual(shape(byName(result, "logicalThenIterates")), [["logicalSequence", 1, 0]]);
+  assert.deepEqual(shape(promotedFrom(result, "logicalThenIterates")), [["if", 1, 0]]);
+});
+
+test("Appendix A: a top-level ternary is structural, so the callback nests and its if scores +2", () => {
+  const fn = byName(scoreFixture("declarative.ts").result, "ternaryThenIterates");
+  assert.equal(fn.score, 3);
+  assert.deepEqual(shape(fn), [
+    ["ternary", 1, 0],
+    ["if", 2, 1],
+  ]);
+});
+
+test("Appendix A: only the outer function is a container — a promoted method nests its lambda, scoring the paper's 2", () => {
+  const { result } = scoreFixture("declarative.ts");
+  assert.equal(byName(result, "faux").score, 0);
+  const method = byName(result, "method");
+  assert.equal(method.parent, null);
+  assert.deepEqual(shape(method), [["if", 2, 1]]);
+  const lambda = byName(result, "r");
+  assert.equal(lambda.parent, result.functions.indexOf(method));
+  assert.equal(lambda.depth, 1);
 });
 
 test("Appendix A: the file total counts each promoted root once", () => {
-  assert.equal(scoreFixture("declarative.ts").result.total, 1 + 3 + 4 + 2);
+  assert.equal(scoreFixture("declarative.ts").result.total, 1 + 3 + 4 + 1 + 1 + 2 + 2 + 3);
+});
+
+// --- increment fields ------------------------------------------------------------------------
+
+test("logical sequence increments carry their operator; no other construct does", () => {
+  const fn = byName(scoreSource("function f(a: boolean, b: boolean, c: boolean): boolean { if (a) { return a && b || c; } return false; }"), "f");
+  assert.deepEqual(
+    fn.increments.map((inc) => [inc.construct, inc.operator]),
+    [
+      ["if", undefined],
+      ["logicalSequence", "&&"],
+      ["logicalSequence", "||"],
+    ],
+  );
+  assert.equal(Object.hasOwn(fn.increments[0], "operator"), false);
 });
 
 // --- top level ---------------------------------------------------------------------------

@@ -1,1 +1,29 @@
-[]
+[
+  {
+    "kind": "clause",
+    "match": "logicalSequence",
+    "operator": "||",
+    "reason": "SonarCloud counts sequences of && but not of ||; Appendix B §1 counts every sequence of binary logical operators, so the specification is kept and the || runs are the recorded difference.",
+    "addedAt": "2026-09-06"
+  },
+  {
+    "kind": "clause",
+    "match": "recursion",
+    "reason": "SonarCloud does not increment for recursion cycles in TypeScript; Appendix B §1 does (\"each method in a recursion cycle\"), so the specification is kept.",
+    "addedAt": "2026-09-06"
+  },
+  {
+    "kind": "file",
+    "match": "src/bases/dailyNoteAccess.ts",
+    "expectedDelta": 1,
+    "reason": "Inside the declarative outer function createDailyNoteAccess, SonarCloud leaks one nesting level for the rest of the function after each function placed in a ternary (lines 203 and 217), adding 4 on top of the 3 uncounted || runs; the specification has no such rule.",
+    "addedAt": "2026-09-06"
+  },
+  {
+    "kind": "file",
+    "match": "src/datasource/calendarItems/externalCalendarSource.ts",
+    "expectedDelta": 11,
+    "reason": "Inside the declarative outer function createExternalCalendarSource, SonarCloud leaks one nesting level for the rest of the function after the arrow placed in the ternary at line 913, adding 25 on top of the 14 uncounted || runs; the specification has no such rule.",
+    "addedAt": "2026-09-06"
+  }
+]

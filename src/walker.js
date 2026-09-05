@@ -63,28 +63,11 @@ const TS_WRAPPERS = new Set(["TSAsExpression", "TSSatisfiesExpression", "TSNonNu
 
 const LOOP_TYPES = new Set(["ForStatement", "ForInStatement", "ForOfStatement", "WhileStatement", "DoWhileStatement"]);
 
-/** Statements that are declarations on their face (Appendix A, "contain only declarations"). */
-const DECLARATION_TYPES = new Set([
-  "FunctionDeclaration",
-  "ClassDeclaration",
-  "TSDeclareFunction",
-  "TSInterfaceDeclaration",
-  "TSTypeAliasDeclaration",
-  "TSEnumDeclaration",
-  "TSModuleDeclaration",
-  "EmptyStatement",
-]);
+/** Nodes subject to a structural or hybrid increment (Appendix B §1): the ones whose presence at a function's top level makes it non-declarative (Appendix A). */
+const STRUCTURE_TYPES = new Set(["IfStatement", "ConditionalExpression", "SwitchStatement", "CatchClause", ...LOOP_TYPES]);
 
-/** Expression forms that execute something or carry a structural increment. */
-const EXECUTION_TYPES = new Set([
-  "CallExpression",
-  "NewExpression",
-  "TaggedTemplateExpression",
-  "ImportExpression",
-  "AwaitExpression",
-  "YieldExpression",
-  "ConditionalExpression",
-]);
+/** Nodes the walker scores as function-like entries of their own, so their contents are "nested inside a sub-function" for Appendix A. */
+const NESTED_SCOPE_TYPES = new Set([...FUNCTION_TYPES, "StaticBlock", "PropertyDefinition"]);
 
 /** Statement-level containers searched for hoisted `var` declarations. */
 const STATEMENT_CONTAINERS = new Set([
@@ -268,44 +251,30 @@ function targetName(node) {
 // --- Appendix A: declarative outer function --------------------------------------------
 
 /**
- * Paper p. 14: an outer function used "purely as a declarative mechanism, that is when they
- * contain only declarations at the top level" is ignored; a top-level statement subject to a
- * structural increment makes it a normal function. A statement counts as a declaration when it
- * is one syntactically, or assigns a value that neither executes anything nor carries a
- * structural increment outside its nested functions (the paper's `bar.myFun = function`).
+ * Paper p. 14: an outer function used "purely as a declarative mechanism" is ignored, and the
+ * paper's test for the opposite is "the presence at the top level of a function (i.e. not
+ * nested inside a sub-function) of statements subject to structural increments". So a function
+ * is declarative when nothing outside its nested functions is subject to a structural or hybrid
+ * increment. Calls, assignments and returns do not disqualify it (the paper's own example
+ * assigns `bar.myFun`), and neither do logical sequences or labelled jumps, which are
+ * fundamental increments.
  */
 function isDeclarative(fn) {
-  return isNode(fn.body) && fn.body.type === "BlockStatement" && fn.body.body.every(isDeclarationStatement);
+  return !containsStructure(fn.body);
 }
 
-function isDeclarationStatement(statement) {
-  if (DECLARATION_TYPES.has(statement.type)) {
+function containsStructure(node) {
+  if (!isNode(node)) {
+    return false;
+  }
+  if (STRUCTURE_TYPES.has(node.type)) {
     return true;
   }
-  if (statement.type === "VariableDeclaration") {
-    return statement.declarations.every((declarator) => declarator.init === null || isDeclarativeValue(declarator.init));
-  }
-  if (statement.type === "ExpressionStatement") {
-    const expression = unwrap(statement.expression);
-    return expression.type === "AssignmentExpression" && expression.operator === "=" && isDeclarativeValue(expression.right);
-  }
-  return false;
-}
-
-function isDeclarativeValue(node) {
-  const inner = unwrap(node);
-  return isFunctionNode(inner) || inner.type === "ClassExpression" || !containsExecution(inner);
-}
-
-function containsExecution(node) {
-  if (EXECUTION_TYPES.has(node.type)) {
-    return true;
-  }
-  if (isFunctionNode(node) || node.type === "ClassExpression") {
+  if (NESTED_SCOPE_TYPES.has(node.type)) {
     return false;
   }
   for (const child of children(node)) {
-    if (containsExecution(child)) {
+    if (containsStructure(child)) {
       return true;
     }
   }
@@ -596,10 +565,11 @@ export class Walker {
 
   // --- increments ------------------------------------------------------------------------
 
-  emit(construct, nesting, nestingIncrement, loc) {
+  /** `extra` adds construct-specific fields to the increment (the operator of a logical sequence). */
+  emit(construct, nesting, nestingIncrement, loc, extra = undefined) {
     const contribution = nestingIncrement ? nesting : 0;
     for (const entry of this.chain) {
-      entry.increments.push({ construct, amount: 1 + contribution, nesting: contribution, loc });
+      entry.increments.push({ construct, amount: 1 + contribution, nesting: contribution, loc, ...extra });
       entry.score += 1 + contribution;
     }
   }
@@ -672,13 +642,16 @@ export class Walker {
       return;
     }
     const parentFrame = this.frames[this.frames.length - 1];
-    // Appendix A: a declarative container does not nest its functions; they become roots.
-    const isRoot = parentFrame === undefined || parentFrame.declarative;
+    // Appendix A: a declarative container does not nest its functions; they become roots. Only
+    // an outer function is a container: a promoted function is a method of the faux class and
+    // nests its own functions like any other (the paper's lambda-in-a-method example).
+    const isRoot = parentFrame === undefined || parentFrame.container;
     const entry = {
       name: hint.name ?? (node.id ? node.id.name : ANONYMOUS),
       kind: "function",
       depth: isRoot ? 0 : parentFrame.entry.depth + 1,
       parent: isRoot ? null : parentFrame.index,
+      nesting: isRoot ? 0 : nesting + 1,
       loc: this.copyLoc(hint.owner ?? node),
       nameLoc: this.nameLoc(node, hint),
       score: 0,
@@ -692,7 +665,7 @@ export class Walker {
     if (node.type !== "ArrowFunctionExpression" || hint.thisContext !== undefined) {
       this.thisContext = hint.thisContext ?? null;
     }
-    this.frames.push({ index, entry, node, declarative: isDeclarative(node) });
+    this.frames.push({ index, entry, node, container: parentFrame === undefined && isDeclarative(node) });
     this.visitFunctionContents(node, isRoot ? 0 : nesting + 1);
     this.frames.pop();
     this.chain = saved.chain;
@@ -834,7 +807,7 @@ export class Walker {
     let previous = null;
     for (const { operator, left, right } of operators) {
       if (operator !== previous) {
-        this.emit("logicalSequence", 0, false, this.betweenLoc(left, right, operator));
+        this.emit("logicalSequence", 0, false, this.betweenLoc(left, right, operator), { operator });
         previous = operator;
       }
     }

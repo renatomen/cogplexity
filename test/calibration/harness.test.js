@@ -33,18 +33,27 @@ function loc(startLine, endLine = startLine) {
   return { start: { line: startLine, column: 0 }, end: { line: endLine, column: 1 } };
 }
 
-function inc(construct, amount = 1, line = 1) {
-  return { construct, amount, nesting: amount - 1, loc: loc(line) };
+function inc(construct, amount = 1, line = 1, extra = {}) {
+  return { construct, amount, nesting: amount - 1, loc: loc(line), ...extra };
+}
+
+const OR = (line) => inc("logicalSequence", 1, line, { operator: "||" });
+const AND = (line) => inc("logicalSequence", 1, line, { operator: "&&" });
+
+/** `n` sequential top-level `if` increments from `line` on. */
+function ifs(n, line = 2) {
+  return Array.from({ length: n }, (_, i) => inc("if", 1, line + i));
 }
 
 /** A function entry; `score` defaults to the sum of its increments. */
-function fn({ name = "f", line = 1, endLine = line + 10, increments = [], score, parent = null }) {
+function fn({ name = "f", line = 1, endLine = line + 10, increments = [], score, parent = null, nesting = parent === null ? 0 : 1 }) {
   const own = increments.reduce((sum, i) => sum + i.amount, 0);
   return {
     name,
     kind: "function",
     depth: parent === null ? 0 : 1,
     parent,
+    nesting,
     loc: loc(line, endLine),
     nameLoc: loc(line),
     score: score ?? own,
@@ -70,6 +79,10 @@ function fixture(files, issues = []) {
 
 function clause(match, reason = "Sonar does not count it") {
   return { kind: "clause", match, reason, addedAt: ADDED };
+}
+
+function orClause() {
+  return { ...clause("logicalSequence", "Sonar does not count || runs"), operator: "||" };
 }
 
 function fileEntry(match, expectedDelta, reason = "recorded divergence") {
@@ -99,7 +112,7 @@ const AE7_RESULT = result([fn({ name: "walk", line: 1, endLine: 40, increments: 
 test("AE7: a file at Sonar 187 and local 188 from one recursion increment passes with a clause: recursion entry", async () => {
   const comparison = await run({ files: { "src/a.ts": 187 }, issues: [{ path: "src/a.ts", line: 1, score: 188 }], ledger: [clause("recursion")], results: { "src/a.ts": AE7_RESULT } });
   assert.equal(comparison.ok, true, problemsText(comparison));
-  assert.equal(comparison.mismatches.files[0].coveredBy.match, "recursion");
+  assert.deepEqual(comparison.mismatches.files[0].coveredBy.map((e) => e.match), ["recursion"]);
 });
 
 test("AE7: the same file without a recursion entry fails naming the file and +1", async () => {
@@ -120,7 +133,7 @@ test("exact match on every path and every issue passes with an empty ledger", as
   const comparison = await run({ files: { "src/a.ts": 17, "src/b.ts": 2 }, issues: [{ path: "src/a.ts", line: 3, score: 16 }], results });
   assert.equal(comparison.ok, true, problemsText(comparison));
   assert.deepEqual(comparison.problems, []);
-  assert.deepEqual(comparison.summary, { files: 2, issues: 1, roots: 1, ledgerApplied: 0 });
+  assert.deepEqual(comparison.summary, { files: 2, issues: 1, reported: 1, ledgerApplied: 0 });
 });
 
 // --- per-function ----------------------------------------------------------------
@@ -159,7 +172,21 @@ test("matching line and score for every reported root passes", async () => {
   ];
   const comparison = await run({ files: { "src/a.ts": 37 }, issues, results });
   assert.equal(comparison.ok, true, problemsText(comparison));
-  assert.equal(comparison.summary.roots, 2);
+  assert.equal(comparison.summary.reported, 2);
+});
+
+test("per-function findings use each function's own body, nested functions excluded, with nesting counted from that body", async () => {
+  const insideChild = Array.from({ length: 16 }, (_, i) => inc("if", 2, 6 + i));
+  const outer = fn({ name: "outer", line: 1, endLine: 40, increments: [inc("if", 1, 2), ...insideChild] });
+  const inner = fn({ name: "inner", line: 4, endLine: 30, parent: 0, nesting: 1, increments: insideChild });
+  const r = result([outer, inner]);
+  assert.equal(r.total, 33);
+  const matched = await run({ files: { "src/a.ts": 33 }, issues: [{ path: "src/a.ts", line: 4, score: 16 }], results: { "src/a.ts": r } });
+  assert.equal(matched.ok, true, problemsText(matched));
+  assert.equal(matched.summary.reported, 1);
+  const unmatched = await run({ files: { "src/a.ts": 33 }, results: { "src/a.ts": r } });
+  assert.match(problemsText(unmatched), /src\/a\.ts:4 inner: sonar none, local 16/);
+  assert.doesNotMatch(problemsText(unmatched), /outer/);
 });
 
 test("a root exactly at the threshold is not reported, matching Sonar's strict comparison", async () => {
@@ -259,6 +286,61 @@ test("a clause entry whose match is not a construct identifier is rejected", asy
 test("a ledger entry without a reason is rejected", async () => {
   const comparison = await run({ files: { "src/a.ts": 3 }, ledger: [{ ...clause("recursion"), reason: "" }], results: { "src/a.ts": UNDER_BY_ONE } });
   assert.match(problemsText(comparison), /ledger entry 1 \(recursion\) has no reason/);
+});
+
+test("a clause: logicalSequence entry with operator || covers exactly the || runs and leaves && runs counted", async () => {
+  const r = result([fn({ name: "f", line: 1, increments: [inc("if", 1, 2), OR(3), OR(4), AND(5)] })]);
+  const covered = await run({ files: { "src/a.ts": 2 }, ledger: [orClause()], results: { "src/a.ts": r } });
+  assert.equal(covered.ok, true, problemsText(covered));
+  assert.deepEqual(covered.mismatches.files[0].coveredBy.map((e) => e.operator), ["||"]);
+  assert.equal(constructAmount(r, "logicalSequence", "||"), 2);
+  assert.equal(constructAmount(r, "logicalSequence"), 3);
+  const notCovered = await run({ files: { "src/a.ts": 1 }, ledger: [orClause()], results: { "src/a.ts": r } });
+  assert.equal(notCovered.ok, false);
+  assert.match(problemsText(notCovered), /^src\/a\.ts: sonar 1, local 4, delta \+3/m);
+});
+
+test("clause entries combine: a delta of one || run plus one recursion increment needs both entries", async () => {
+  const r = result([fn({ name: "f", line: 1, increments: [inc("if", 1, 2), OR(3), inc("recursion", 1, 4)] })]);
+  const both = await run({ files: { "src/a.ts": 1 }, ledger: [orClause(), clause("recursion")], results: { "src/a.ts": r } });
+  assert.equal(both.ok, true, problemsText(both));
+  assert.deepEqual(both.mismatches.files[0].coveredBy.map((e) => e.match), ["logicalSequence", "recursion"]);
+  assert.equal(both.summary.ledgerApplied, 2);
+  const one = await run({ files: { "src/a.ts": 1 }, ledger: [orClause()], results: { "src/a.ts": r } });
+  assert.equal(one.ok, false);
+  assert.match(problemsText(one), /^src\/a\.ts: sonar 1, local 3, delta \+2/m);
+});
+
+test("an operator on a non-logicalSequence entry or an unknown operator is rejected", async () => {
+  const wrongConstruct = await run({ files: { "src/a.ts": 3 }, ledger: [{ ...clause("recursion"), operator: "||" }], results: { "src/a.ts": UNDER_BY_ONE } });
+  assert.match(problemsText(wrongConstruct), /ledger clause entry "recursion" carries an operator; only logicalSequence clause entries may/);
+  const onFile = await run({ files: { "src/a.ts": 3 }, ledger: [{ ...fileEntry("src/a.ts", -1), operator: "||" }], results: { "src/a.ts": UNDER_BY_ONE } });
+  assert.match(problemsText(onFile), /ledger file entry "src\/a\.ts" carries an operator/);
+  const wrongOperator = await run({ files: { "src/a.ts": 3 }, ledger: [{ ...orClause(), operator: "??" }], results: { "src/a.ts": UNDER_BY_ONE } });
+  assert.match(problemsText(wrongOperator), /ledger clause entry "logicalSequence" has operator "\?\?"; expected "&&" or "\|\|"/);
+});
+
+test("a clause entry accepts a per-function mismatch it explains: a root at 16 with one || run and no fixture issue", async () => {
+  const r = result([fn({ name: "f", line: 1, increments: [...ifs(15), OR(20)] })]);
+  const comparison = await run({ files: { "src/a.ts": 15 }, ledger: [orClause()], results: { "src/a.ts": r } });
+  assert.equal(comparison.ok, true, problemsText(comparison));
+  assert.deepEqual(comparison.mismatches.functions.map((m) => [m.name, m.coveredBy.map((e) => e.match)]), [["f", ["logicalSequence"]]]);
+  assert.equal(comparison.summary.ledgerApplied, 1);
+});
+
+test("a clause entry accepts a per-function mismatch whose Sonar score is the local score minus its increments", async () => {
+  const r = result([fn({ name: "f", line: 1, increments: [...ifs(17), inc("recursion", 1, 20)] })]);
+  const comparison = await run({ files: { "src/a.ts": 17 }, issues: [{ path: "src/a.ts", line: 1, score: 17 }], ledger: [clause("recursion")], results: { "src/a.ts": r } });
+  assert.equal(comparison.ok, true, problemsText(comparison));
+});
+
+test("a clause entry does not accept a per-function mismatch it does not explain", async () => {
+  const r = result([fn({ name: "f", line: 1, increments: [...ifs(16), OR(20)] })]);
+  const comparison = await run({ files: { "src/a.ts": 16 }, ledger: [orClause()], results: { "src/a.ts": r } });
+  assert.equal(comparison.ok, false);
+  assert.match(problemsText(comparison), /src\/a\.ts:1 f: sonar none, local 17/);
+  const wrongScore = await run({ files: { "src/a.ts": 16 }, issues: [{ path: "src/a.ts", line: 1, score: 14 }], ledger: [orClause()], results: { "src/a.ts": r } });
+  assert.match(problemsText(wrongScore), /src\/a\.ts:1 f: sonar 14, local 17/);
 });
 
 test("coversByFile requires the exact path and the exact Sonar-minus-local delta", () => {

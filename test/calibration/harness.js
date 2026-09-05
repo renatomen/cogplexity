@@ -8,6 +8,12 @@
 // entry must equal. A `file` entry's `expectedDelta` is `sonar - local` (KTD9), so
 // a reported delta of +1 is recorded as `expectedDelta: -1`.
 //
+// Coverage. A `file` entry covers its own path. A `clause` entry names a construct and, for
+// `logicalSequence`, optionally an `operator`; every clause entry naming at least one increment
+// in a file must together explain the file's whole delta. The same entries explain a
+// per-function mismatch when the root's score minus their increments equals Sonar's score, or
+// stays at or below THRESHOLD where Sonar reported nothing.
+//
 // Result of `compareFixture`:
 //   {
 //     ok: boolean,                       // problems.length === 0
@@ -15,7 +21,7 @@
 //     mismatches: {
 //       files: [{ path, sonar, local, delta, coveredBy }],      // every file whose totals differ
 //       functions: [{ path, line, name, sonar, local, coveredBy }], // per-function differences
-//     },
+//     },                                                        // coveredBy: LedgerEntry[] | null
 //     uncovered: [...mismatches.files with coveredBy === null],
 //     missingPaths: string[],            // fixture paths absent at the commit
 //     droppedPaths: string[],            // eligible at the commit, absent from the fixture
@@ -23,8 +29,12 @@
 //     invalidEntries: [{ entry, reason }],
 //     fileEntryFailures: [{ path, expectedDelta, observedDelta }],
 //     presence: { recursion: boolean, declarativeOuter: boolean },
-//     summary: { files, issues, roots, ledgerApplied },
+//     summary: { files, issues, reported, ledgerApplied },
 //   }
+//
+// Per-function findings compare what SonarCloud reports per function (S3776): the score of
+// the function's own body — nested functions excluded, nesting counted from that body — not
+// the inclusive root score the rule reports; `ownScores` derives it from the same increments.
 import path from "node:path";
 
 import { CONSTRUCTS } from "../../src/score.js";
@@ -34,22 +44,31 @@ import { ELIGIBLE_EXTENSIONS, isEligiblePath } from "../../scripts/refresh-fixtu
 export const THRESHOLD = 15;
 
 const KINDS = new Set(["file", "clause"]);
+const OPERATORS = new Set(["&&", "||"]);
 
 // --- ledger ------------------------------------------------------------------
 
 function entryProblem(entry, index) {
-  const label = `ledger entry ${index + 1} (${entry?.match ?? "?"})`;
   if (entry === null || typeof entry !== "object") return `ledger entry ${index + 1} is not an object`;
+  const label = `ledger entry ${index + 1} (${entry.match ?? "?"})`;
   if (!KINDS.has(entry.kind)) return `${label} has kind "${entry.kind}"; expected "file" or "clause"`;
   if (typeof entry.match !== "string" || entry.match === "") return `${label} has no match`;
   if (typeof entry.reason !== "string" || entry.reason.trim() === "") return `${label} has no reason`;
   if (typeof entry.addedAt !== "string" || entry.addedAt === "") return `${label} has no addedAt`;
-  if (entry.kind === "file" && !Number.isInteger(entry.expectedDelta)) {
-    return `ledger file entry "${entry.match}" has no integer expectedDelta`;
-  }
-  if (entry.kind === "clause" && !CONSTRUCTS.includes(entry.match)) {
-    return `ledger clause entry "${entry.match}" is not a construct identifier (${CONSTRUCTS.join(", ")})`;
-  }
+  return entry.kind === "file" ? fileEntryProblem(entry) : clauseEntryProblem(entry);
+}
+
+function fileEntryProblem(entry) {
+  if (!Number.isInteger(entry.expectedDelta)) return `ledger file entry "${entry.match}" has no integer expectedDelta`;
+  if (entry.operator !== undefined) return `ledger file entry "${entry.match}" carries an operator; only logicalSequence clause entries may`;
+  return null;
+}
+
+function clauseEntryProblem(entry) {
+  if (!CONSTRUCTS.includes(entry.match)) return `ledger clause entry "${entry.match}" is not a construct identifier (${CONSTRUCTS.join(", ")})`;
+  if (entry.operator === undefined) return null;
+  if (entry.match !== "logicalSequence") return `ledger clause entry "${entry.match}" carries an operator; only logicalSequence clause entries may`;
+  if (!OPERATORS.has(entry.operator)) return `ledger clause entry "${entry.match}" has operator "${entry.operator}"; expected "&&" or "||"`;
   return null;
 }
 
@@ -67,19 +86,42 @@ export function validateLedger(ledger) {
   return { entries, invalidEntries };
 }
 
-/** Summed `amount` of one construct over root functions and top level (roots are inclusive of nested entries). */
-export function constructAmount(result, construct) {
-  const scopes = [...result.functions.filter((fn) => fn.parent === null), result.topLevel];
+/** Whether an increment is one a clause entry names: its construct, and its operator when the entry has one. */
+function matchesClause(entry, increment) {
+  return increment.construct === entry.match && (entry.operator === undefined || increment.operator === entry.operator);
+}
+
+/** Summed `amount` of the increments a clause entry names in one increment list. */
+function clauseAmountIn(entry, increments) {
   let sum = 0;
-  for (const scope of scopes) {
-    for (const increment of scope.increments) if (increment.construct === construct) sum += increment.amount;
-  }
+  for (const increment of increments) if (matchesClause(entry, increment)) sum += increment.amount;
   return sum;
 }
 
-/** A clause entry covers a file only when the whole delta is that construct's contribution. */
+/** The same, summed over root functions and top level (roots are inclusive of nested entries). */
+function clauseAmount(entry, result) {
+  const scopes = [...result.functions.filter((fn) => fn.parent === null), result.topLevel];
+  return scopes.reduce((sum, scope) => sum + clauseAmountIn(entry, scope.increments), 0);
+}
+
+/** Summed `amount` of one construct — of one operator, when given — over root functions and top level. */
+export function constructAmount(result, construct, operator = undefined) {
+  return clauseAmount({ match: construct, operator }, result);
+}
+
+/**
+ * The clause entries explaining a file's delta: every clause entry naming at least one
+ * increment in the file, provided their amounts together equal the whole delta. Null otherwise.
+ */
+export function clausesCovering(entries, file) {
+  const present = entries.filter((entry) => entry.kind === "clause" && clauseAmount(entry, file.result) !== 0);
+  const explained = present.reduce((sum, entry) => sum + clauseAmount(entry, file.result), 0);
+  return present.length > 0 && file.delta === explained ? present : null;
+}
+
+/** A clause entry on its own covers a file only when the whole delta is that construct's contribution. */
 export function coversByClause(entry, file) {
-  return entry.kind === "clause" && file.delta !== 0 && file.delta === constructAmount(file.result, entry.match);
+  return clausesCovering([entry], file) !== null;
 }
 
 /** A file entry covers its path only when Sonar minus local equals `expectedDelta` exactly. */
@@ -87,14 +129,39 @@ export function coversByFile(entry, file) {
   return entry.kind === "file" && entry.match === file.path && entry.expectedDelta === file.sonar - file.local;
 }
 
-function covers(entry, file) {
-  return entry.kind === "file" ? coversByFile(entry, file) : coversByClause(entry, file);
+function fileEntryFor(entries, filePath) {
+  return entries.find((entry) => entry.kind === "file" && entry.match === filePath) ?? null;
+}
+
+/** The entries covering a file's delta: its `file` entry when one names the path, else its clause entries. */
+function fileCoverage(entries, file) {
+  const fileEntry = fileEntryFor(entries, file.path);
+  if (fileEntry) return coversByFile(fileEntry, file) ? [fileEntry] : null;
+  return clausesCovering(entries, file);
 }
 
 // --- per-function ----------------------------------------------------------------
 
-function reportedRoots(result) {
-  return result.functions.filter((fn) => fn.parent === null && fn.score > THRESHOLD);
+/** Constructs whose amount carries a nesting increment (Appendix B §3). */
+const NESTING_BEARING = new Set(["if", "ternary", "switch", "loop", "catch", "ifBlock", "eachBlock", "awaitBlock"]);
+
+/**
+ * What SonarCloud reports per function (S3776): the increments of the function's own body —
+ * nested functions excluded — with nesting counted from that body rather than from the file
+ * root. A root without nested functions scores exactly its `score`; the rule itself reports a
+ * root's inclusive score (plan KTD7), so the two only meet through this derivation.
+ */
+export function ownScores(result) {
+  return result.functions.map((entry, index) => {
+    const children = result.functions.filter((fn) => fn.parent === index);
+    const own = entry.increments.filter((inc) => !children.some((child) => encloses(child.loc, inc.loc)));
+    const score = own.reduce((sum, inc) => sum + (NESTING_BEARING.has(inc.construct) ? inc.amount - entry.nesting : inc.amount), 0);
+    return { entry, line: entry.nameLoc.start.line, own, score };
+  });
+}
+
+function reportedCount(result) {
+  return ownScores(result).filter((fn) => fn.score > THRESHOLD).length;
 }
 
 function takeMatching(list, predicate) {
@@ -102,29 +169,42 @@ function takeMatching(list, predicate) {
   return index === -1 ? null : list.splice(index, 1)[0];
 }
 
-function rootMismatch(filePath, root, issue) {
-  return { path: filePath, line: root.nameLoc.start.line, name: root.name, sonar: issue ? issue.score : null, local: root.score, coveredBy: null };
+/**
+ * The entries explaining one per-function mismatch: the path's `file` entry, or the clause
+ * entries whose increments within the function's own body bring its score to Sonar's — or to
+ * THRESHOLD or below where Sonar reported no issue. Null when nothing does.
+ */
+function functionCoverage(entries, filePath, fn, sonar) {
+  const fileEntry = fileEntryFor(entries, filePath);
+  if (fileEntry) return [fileEntry];
+  if (fn === null) return null;
+  const clauses = entries.filter((entry) => entry.kind === "clause" && clauseAmountIn(entry, fn.own) !== 0);
+  const adjusted = fn.score - clauses.reduce((sum, entry) => sum + clauseAmountIn(entry, fn.own), 0);
+  const explained = sonar === null ? adjusted <= THRESHOLD : adjusted === sonar;
+  return clauses.length > 0 && explained ? clauses : null;
 }
 
-function issueMismatch(filePath, issue, result) {
-  const atLine = result.functions.find((fn) => fn.parent === null && fn.nameLoc.start.line === issue.line);
-  return { path: filePath, line: issue.line, name: atLine ? atLine.name : null, sonar: issue.score, local: atLine ? atLine.score : null, coveredBy: null };
+function functionMismatch(entries, filePath, line, fn, sonar) {
+  return { path: filePath, line, name: fn ? fn.entry.name : null, sonar, local: fn ? fn.score : null, coveredBy: functionCoverage(entries, filePath, fn, sonar) };
 }
 
 /**
- * Pairs each reported root with a fixture issue on its name line carrying the same
- * score; whatever is left on either side is a mismatch.
+ * Pairs each function whose own-body score exceeds THRESHOLD with a fixture issue on its
+ * name line carrying the same score; whatever is left on either side is a mismatch, covered
+ * or not by `entries`.
  */
-export function compareFindings(filePath, result, issues) {
+export function compareFindings(filePath, result, issues, entries = []) {
   const pending = issues.filter((issue) => issue.path === filePath);
+  const functions = ownScores(result);
   const mismatches = [];
-  for (const root of reportedRoots(result)) {
-    const line = root.nameLoc.start.line;
-    const exact = takeMatching(pending, (issue) => issue.line === line && issue.score === root.score);
-    if (exact) continue;
-    mismatches.push(rootMismatch(filePath, root, takeMatching(pending, (issue) => issue.line === line)));
+  for (const fn of functions.filter((candidate) => candidate.score > THRESHOLD)) {
+    if (takeMatching(pending, (issue) => issue.line === fn.line && issue.score === fn.score)) continue;
+    const issue = takeMatching(pending, (candidate) => candidate.line === fn.line);
+    mismatches.push(functionMismatch(entries, filePath, fn.line, fn, issue ? issue.score : null));
   }
-  for (const issue of pending) mismatches.push(issueMismatch(filePath, issue, result));
+  for (const issue of pending) {
+    mismatches.push(functionMismatch(entries, filePath, issue.line, functions.find((fn) => fn.line === issue.line) ?? null, issue.score));
+  }
   return mismatches;
 }
 
@@ -185,7 +265,7 @@ function fileLine(m) {
 
 function functionLine(m) {
   const where = m.name === null ? `${m.path}:${m.line}` : `${m.path}:${m.line} ${m.name}`;
-  const why = m.sonar === null ? " (no fixture issue at this line)" : m.local === null ? ` (no root function over ${THRESHOLD} at this line)` : "";
+  const why = m.sonar === null ? " (no fixture issue at this line)" : m.local === null ? " (no function at this line)" : "";
   return `${where}: sonar ${orNone(m.sonar)}, local ${orNone(m.local)}${why}`;
 }
 
@@ -216,7 +296,7 @@ export function formatReport(comparison) {
   const { summary, presence } = comparison;
   const yesNo = (flag) => (flag ? "yes" : "no");
   return [
-    `compared ${summary.files} file total(s) and ${summary.issues} fixture issue(s); ${summary.roots} root function(s) over ${THRESHOLD}; ${summary.ledgerApplied} ledger entr(y/ies) applied`,
+    `compared ${summary.files} file total(s) and ${summary.issues} fixture issue(s); ${summary.reported} function(s) over ${THRESHOLD} by own body; ${summary.ledgerApplied} ledger entr(y/ies) applied`,
     `construct presence: recursion=${yesNo(presence.recursion)} declarativeOuter=${yesNo(presence.declarativeOuter)}`,
     ...comparison.problems,
   ].join("\n");
@@ -237,11 +317,8 @@ async function scoreFixtureFiles(fixture, scoreFile, missing) {
 
 function applyLedger(entries, files) {
   const used = new Set();
-  const mismatches = files.filter((file) => file.delta !== 0).map((file) => ({ ...file, coveredBy: null }));
-  for (const mismatch of mismatches) {
-    mismatch.coveredBy = entries.find((entry) => covers(entry, mismatch)) ?? null;
-    if (mismatch.coveredBy) used.add(mismatch.coveredBy);
-  }
+  const mismatches = files.filter((file) => file.delta !== 0).map((file) => ({ ...file, coveredBy: fileCoverage(entries, file) }));
+  for (const mismatch of mismatches) for (const entry of mismatch.coveredBy ?? []) used.add(entry);
   return { mismatches, used };
 }
 
@@ -268,10 +345,7 @@ function checkEntries(entries, files, used) {
 }
 
 function functionMismatches(files, fixture, entries) {
-  const fileEntryFor = (filePath) => entries.find((e) => e.kind === "file" && e.match === filePath) ?? null;
-  return files.flatMap((file) =>
-    compareFindings(file.path, file.result, fixture.issues).map((m) => ({ ...m, coveredBy: fileEntryFor(file.path) })),
-  );
+  return files.flatMap((file) => compareFindings(file.path, file.result, fixture.issues, entries));
 }
 
 function presenceOf(files) {
@@ -281,14 +355,14 @@ function presenceOf(files) {
   };
 }
 
-function summarize(files, fixture, used, fileEntryFailures, functions) {
-  const appliedFileEntries = new Set(functions.map((m) => m.coveredBy).filter(Boolean));
-  for (const entry of used) appliedFileEntries.add(entry);
+function summarize(files, fixture, used, functions) {
+  const applied = new Set(used);
+  for (const mismatch of functions) for (const entry of mismatch.coveredBy ?? []) applied.add(entry);
   return {
     files: files.length,
     issues: fixture.issues.length,
-    roots: files.reduce((sum, file) => sum + reportedRoots(file.result).length, 0),
-    ledgerApplied: appliedFileEntries.size,
+    reported: files.reduce((sum, file) => sum + reportedCount(file.result), 0),
+    ledgerApplied: applied.size,
   };
 }
 
@@ -317,7 +391,7 @@ export async function compareFixture({ fixture, ledger, scoreFile, listFiles }) 
     invalidEntries,
     fileEntryFailures,
     presence: presenceOf(files),
-    summary: summarize(files, fixture, used, fileEntryFailures, functions),
+    summary: summarize(files, fixture, used, functions),
   };
   comparison.problems = collectProblems(comparison);
   comparison.ok = comparison.problems.length === 0;
