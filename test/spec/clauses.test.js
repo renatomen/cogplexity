@@ -488,26 +488,38 @@ test("increment locations carry a start and an end position", () => {
   }
 });
 
+/** Node-shaped values among a node's own properties, `parent` excluded. */
+function* childNodesOf(node) {
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "parent") {
+      continue;
+    }
+    for (const child of Array.isArray(value) ? value : [value]) {
+      if (child && typeof child === "object" && typeof child.type === "string") {
+        yield child;
+      }
+    }
+  }
+}
+
+/** Attach a `parent` back-reference to every node, as ESLint does before a rule runs. */
+function attachParents(ast) {
+  const stack = [ast];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    for (const child of childNodesOf(node)) {
+      child.parent = node;
+      stack.push(child);
+    }
+  }
+}
+
 test("scoring terminates and is unchanged when every node carries a parent back-reference", () => {
   const text = readFixture("appendix-c-yui-save.ts");
   const options = { range: true, loc: true, sourceType: "module", ecmaVersion: "latest" };
   const plain = score(parse(text, options), text);
   const ast = parse(text, options);
-  const stack = [ast];
-  while (stack.length > 0) {
-    const node = stack.pop();
-    for (const [key, value] of Object.entries(node)) {
-      if (key === "parent") {
-        continue;
-      }
-      for (const child of Array.isArray(value) ? value : [value]) {
-        if (child && typeof child === "object" && typeof child.type === "string") {
-          child.parent = node;
-          stack.push(child);
-        }
-      }
-    }
-  }
+  attachParents(ast);
   assert.deepEqual(score(ast, text), plain);
 });
 

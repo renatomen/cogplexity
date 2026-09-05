@@ -440,6 +440,41 @@ function definedFunction(variable) {
   return null;
 }
 
+// --- `this.<name>` members of a class body or object literal ----------------------------
+
+/** Member node types whose `value` may be a function. */
+const FUNCTION_MEMBER_TYPES = new Set(["MethodDefinition", "PropertyDefinition", "Property"]);
+
+/** Member kinds that `this.<name>()` never calls. */
+const UNCALLABLE_KINDS = new Set(["get", "set", "constructor"]);
+
+function memberKey(isStatic, name) {
+  return `${isStatic ? "static" : "instance"}:${name}`;
+}
+
+/** `[key, function]` for a member that `this.<name>()` can reach, or null. */
+function callableMember(member) {
+  const value = FUNCTION_MEMBER_TYPES.has(member.type) ? functionValue(member.value) : null;
+  if (value === null || UNCALLABLE_KINDS.has(member.kind)) {
+    return null;
+  }
+  const name = keyName(member);
+  return name === null ? null : [memberKey(Boolean(member.static), name), value];
+}
+
+/** The callable members of a class body or object literal, keyed by `memberKey`. */
+function memberTable(container) {
+  const table = new Map();
+  const members = container.type === "ObjectExpression" ? container.properties : container.body.body;
+  for (const member of members) {
+    const entry = callableMember(member);
+    if (entry) {
+      table.set(entry[0], entry[1]);
+    }
+  }
+  return table;
+}
+
 // --- strongly connected components (Tarjan) for the recursion clause -------------------
 
 function stronglyConnected(count, edges) {
@@ -826,18 +861,10 @@ export class Walker {
     }
     let table = this.members.get(container);
     if (!table) {
-      table = new Map();
-      const members = container.type === "ObjectExpression" ? container.properties : container.body.body;
-      for (const member of members) {
-        const value = member.type === "MethodDefinition" || member.type === "PropertyDefinition" || member.type === "Property" ? functionValue(member.value) : null;
-        const memberName = value && !(member.kind === "get" || member.kind === "set" || member.kind === "constructor") ? keyName(member) : null;
-        if (memberName !== null) {
-          table.set(`${member.static ? "static" : "instance"}:${memberName}`, value);
-        }
-      }
+      table = memberTable(container);
       this.members.set(container, table);
     }
-    return table.get(`${isStatic ? "static" : "instance"}:${name}`) ?? null;
+    return table.get(memberKey(isStatic, name)) ?? null;
   }
 
   /** Paper p. 8: +1 for each function in a recursion cycle, direct or indirect. */
