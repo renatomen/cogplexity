@@ -30,15 +30,87 @@ Requires Node `>=20.19.0` and ESLint `^9.15.0 || ^10.0.0`. Parsers are yours to 
 
 ## Usage
 
-Documented with the rule (later unit).
+The package exposes one rule, `cogplexity/cognitive-complexity`, and a flat-config helper, `scoped(files, options?)`, that returns a single config entry running the rule as an error on the given globs (default options: the bare threshold `15`). It sets no parser and ships no preset globs: you choose the files, you supply the parsers.
+
+```js
+// eslint.config.js
+import tsParser from "@typescript-eslint/parser";
+import svelteParser from "svelte-eslint-parser";
+import { scoped } from "cogplexity";
+
+export default [
+  { files: ["**/*.ts"], languageOptions: { parser: tsParser } },
+  { files: ["**/*.svelte"], languageOptions: { parser: svelteParser, parserOptions: { parser: tsParser } } },
+  scoped(["**/*.ts", "**/*.svelte"], { threshold: 15, templateThreshold: 15 }),
+];
+```
+
+Registering the plugin by hand works the same way:
+
+```js
+import cogplexity from "cogplexity";
+
+export default [{ files: ["**/*.ts"], plugins: { cogplexity }, rules: { "cogplexity/cognitive-complexity": ["error", 15] } }];
+```
+
+Suppress a finding with ESLint's own `// eslint-disable-next-line cogplexity/cognitive-complexity`; the package defines no directive of its own.
+
+The scoring function behind the rule is exported too, and needs neither ESLint nor its types:
+
+```js
+import { score } from "cogplexity/score";
+
+const { functions, topLevel, template, total } = score(ast, sourceText, { scopeManager });
+```
+
+`functions` holds one entry per function (`name`, `depth`, `parent`, `loc`, `nameLoc`, `score`, `increments`), `topLevel` the statements outside any function, `template` the Svelte template facet (Svelte roots only), and `total` the sum of the root functions and `topLevel`. Each increment is `{ construct, amount, nesting, loc }`; a function's score includes everything nested inside it.
 
 ## Options
 
-Documented with the rule (later unit).
+The rule takes a bare number or an object:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `threshold` | `15` | Root functions scoring strictly above this are reported. A score equal to the threshold does not fire. |
+| `templateThreshold` | `15` | The Svelte template's own threshold, or `false` to skip the template facet for that rule instance (useful in a `files`-scoped override for files that forbid inline config). |
+| `topContributors` | unset | Cap the breakdown to the N largest increments by amount; unset lists every increment. |
+
+A bare number (`["error", 20]`) sets `threshold` only; `templateThreshold` keeps its default.
+
+Each finding carries one of two message ids, so an agent can tell the scores apart without reading prose: `functionComplexity` (located at the function's name) and `templateComplexity` (located at the template's first increment). The message is a header line followed by one line per increment, ordered by amount then position:
+
+```
+save: cognitive complexity 20 exceeds 15
++3 (incl. 2 nesting) if at 12:7
++2 (incl. 1 nesting) loop at 9:5
++1 (incl. 0 nesting) logicalSequence at 4:11
+… 7 more
+```
+
+The template header names `template`. `construct` is one of `if`, `elseIf`, `else`, `ternary`, `switch`, `loop`, `catch`, `logicalSequence`, `labelledJump`, `recursion` for the specification's clauses and `ifBlock`, `elseIfBlock`, `elseBlock`, `eachBlock`, `awaitBlock`, `thenBlock`, `catchBlock` for the Svelte template; the `… k more` line appears only when `topContributors` hides some.
 
 ## Svelte template scoring
 
-Documented with the Svelte facet (later unit). This scoring is the package's own definition; it is not part of the specification and is never cross-checked against Sonar.
+Functions in a `.svelte` file's `<script>` and `<script module>` blocks are scored exactly as in a `.ts` file. The template is a second, independent score against `templateThreshold`; it is **not** part of Campbell's specification, is the package's own definition, and is never cross-checked against Sonar, which does not analyse Svelte. The two numbers never share a threshold and the template is excluded from `score().total`.
+
+Nesting starts at 0 at the markup root. The rows below are the whole definition:
+
+| Template construct | Parser node | Increment | Nesting increment | Raises nesting for children |
+|---|---|---|---|---|
+| `{#if}` | `SvelteIfBlock` with `elseif: false` | +1 structural (`ifBlock`) | yes | yes |
+| `{:else if}` | `SvelteIfBlock` with `elseif: true` | +1 hybrid (`elseIfBlock`) | no | yes |
+| wrapper of an `{:else if}` | `SvelteElseBlock` with `elseif: true` (holds exactly one `SvelteIfBlock`) | +0, transparent | — | no |
+| `{:else}` (of `if` or `each`) | `SvelteElseBlock` with `elseif: false` | +1 hybrid (`elseBlock`) | no | yes |
+| `{#each}` | `SvelteEachBlock` | +1 structural (`eachBlock`) | yes | yes |
+| `{#await}` | `SvelteAwaitBlock` | +1 structural (`awaitBlock`) | yes | yes (pending, then, catch) |
+| `{:then}`, `{:catch}` | `SvelteAwaitThenBlock`, `SvelteAwaitCatchBlock` | +1 hybrid each (`thenBlock`, `catchBlock`) | no | yes |
+| `{#key}` | `SvelteKeyBlock` | +0 | — | no |
+| `{#snippet}` | `SvelteSnippetBlock` | +0 (method-like) | — | yes |
+| inline function in an attribute, directive or mustache | any function node inside markup | +0 (method-like); its contents score into the template, never as a function entry | — | yes |
+| expression logic anywhere in markup | `LogicalExpression`, `ConditionalExpression` in a mustache tag, an attribute or directive value (`class:x={a && b}`, `bind:`), an `{#each}` expression or key, or a `{@render}`/`{@const}`/`{@html}` argument | per the specification at the current template nesting (`logicalSequence`, `ternary`) | per the specification | per the specification |
+| `{@render}`, `{@html}`, `{@const}`, `{@debug}` tags themselves | — | +0 | — | no |
+
+So `{#if a}…{:else if b}…{:else}{#each xs as x}…{/each}{/if}` scores 1 + 1 + 1 + 2 = 5, `{#await p}…{:then v}{#if v}…{/if}{:catch e}…{/await}` scores 1 + 1 + 2 + 1 = 5, and a mustache `{a && b ? x : y}` scores 2 at the root or 3 inside an `{#if}`. Every increment is located at the block's opening keyword or at the operator.
 
 ## Calibration
 
