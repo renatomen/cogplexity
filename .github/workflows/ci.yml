@@ -80,3 +80,50 @@ jobs:
           node-version: "22"
       - run: npm ci --ignore-scripts
       - run: npm run pack:check
+
+  # Exact-match cross-check against SonarCloud on the public corpus (plan KTD9).
+  # Needs no credential: the fixture is checked in and the corpus is public.
+  calibration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - name: Read the fixture's commit and repository
+        id: fixture
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const file = "calibration/fixtures/tasknotes-gantt.json";
+            if (!fs.existsSync(file)) {
+              console.log("no calibration fixture captured yet — skipped");
+              process.exit(0);
+            }
+            const { commitSha, repository } = JSON.parse(fs.readFileSync(file, "utf8"));
+            if (!/^[0-9a-f]{40}$/.test(commitSha)) throw new Error(`unexpected commitSha: ${commitSha}`);
+            if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error(`unexpected repository: ${repository}`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `present=true\ncommit=${commitSha}\nrepository=${repository}\n`);
+            console.log(`fixture pins ${repository} at ${commitSha}`);
+          '
+      - name: Clone the corpus at the fixture commit
+        if: steps.fixture.outputs.present == 'true'
+        env:
+          COMMIT: ${{ steps.fixture.outputs.commit }}
+          REPOSITORY: ${{ steps.fixture.outputs.repository }}
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/corpus"
+          cd "$RUNNER_TEMP/corpus"
+          git init -q
+          git remote add origin "https://github.com/$REPOSITORY.git"
+          git fetch --depth 1 origin "$COMMIT" || git fetch origin
+          git cat-file -e "$COMMIT^{commit}"
+      - name: Calibrate
+        if: steps.fixture.outputs.present == 'true'
+        env:
+          COGPLEXITY_CORPUS: ${{ runner.temp }}/corpus
+        run: npm run calibrate
