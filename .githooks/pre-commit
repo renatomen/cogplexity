@@ -1,0 +1,5 @@
+#!/bin/sh
+# Enable with: git config core.hooksPath .githooks
+set -e
+npm run lint
+npm test

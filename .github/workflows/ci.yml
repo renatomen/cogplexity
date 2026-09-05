@@ -1,0 +1,82 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - run: npm run lint
+      - run: npm run typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: eslint 9 / svelte-eslint-parser 1.8
+            eslint: ""
+            svelte_parser: ""
+          - name: eslint 10 / svelte-eslint-parser 1.8
+            eslint: "10.10.0"
+            svelte_parser: ""
+          - name: eslint 9 / svelte-eslint-parser 1.3
+            eslint: ""
+            svelte_parser: "1.3.3"
+    name: test (${{ matrix.name }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - name: Install matrix ESLint (exact version, no lifecycle scripts)
+        if: matrix.eslint != ''
+        run: npm i --no-save --ignore-scripts eslint@${{ matrix.eslint }}
+      - name: Install matrix svelte-eslint-parser (exact version, no lifecycle scripts)
+        if: matrix.svelte_parser != ''
+        run: npm i --no-save --ignore-scripts svelte-eslint-parser@${{ matrix.svelte_parser }}
+      - run: npx eslint --version
+      - run: npm test
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - run: npm ls --omit=dev
+      - run: npm audit --omit=dev --audit-level=high
+      - run: npm run audit:dev
+
+  pack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - run: npm run pack:check

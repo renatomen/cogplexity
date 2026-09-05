@@ -1,1 +1,6 @@
 .context/compound-engineering/
+node_modules/
+.env
+.env.*
+*.tgz
+
