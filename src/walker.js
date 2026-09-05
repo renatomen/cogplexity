@@ -25,7 +25,7 @@ export const CONSTRUCTS = Object.freeze([
   "catchBlock",
 ]);
 
-export const ANONYMOUS = "<anonymous>";
+const ANONYMOUS = "<anonymous>";
 
 /**
  * Own properties never descended into. `parent` is the back-reference ESLint and
@@ -502,8 +502,6 @@ export class Walker {
     this.topLevel = { kind: "topLevel", score: 0, increments: [] };
     /** Entries receiving the increments emitted right now (a root and its nested chain). */
     this.chain = [this.topLevel];
-    /** Per function entry, the indices of the entries its increments accrue to. */
-    this.chains = [];
     /** Frames of the functions lexically enclosing the current node. */
     this.frames = [];
     /** Functions-in-markup mode (KTD2): a function raises nesting but opens no entry. */
@@ -614,7 +612,12 @@ export class Walker {
     }
   }
 
+  /** The walker's own scope map is only consulted without a scope manager; with one, skip building it. */
   withScope(declare, body) {
+    if (this.useScopeManager) {
+      body();
+      return;
+    }
     const scope = { parent: this.scope, bindings: new Map() };
     this.scope = scope;
     declare(scope);
@@ -641,7 +644,7 @@ export class Walker {
       this.visitInlineFunction(node, nesting);
       return;
     }
-    const parentFrame = this.frames[this.frames.length - 1];
+    const parentFrame = this.frames.at(-1);
     // Appendix A: a declarative container does not nest its functions; they become roots. Only
     // an outer function is a container: a promoted function is a method of the faux class and
     // nests its own functions like any other (the paper's lambda-in-a-method example).
@@ -661,7 +664,6 @@ export class Walker {
     this.entryByNode.set(node, index);
     const saved = { chain: this.chain, thisContext: this.thisContext };
     this.chain = isRoot ? [entry] : [...saved.chain, entry];
-    this.chains.push(this.chain.filter((member) => member !== this.topLevel).map((member) => this.functions.indexOf(member)));
     if (node.type !== "ArrowFunctionExpression" || hint.thisContext !== undefined) {
       this.thisContext = hint.thisContext ?? null;
     }
@@ -826,7 +828,7 @@ export class Walker {
     const target = this.resolveCallee(callee);
     if (target && this.frames.length > 0) {
       const token = callee.type === "Identifier" ? callee : callee.property;
-      this.calls.push({ from: this.chains[this.frames[this.frames.length - 1].index], target, loc: this.copyLoc(token) });
+      this.calls.push({ from: this.ancestry(this.frames.at(-1).index), target, loc: this.copyLoc(token) });
     }
     this.visitChildren(node, nesting);
   }
@@ -869,6 +871,18 @@ export class Walker {
     return table.get(memberKey(isStatic, name)) ?? null;
   }
 
+  /**
+   * Indices of the entries a function's increments accrue to: itself and its ancestors up to
+   * its root. `parent` mirrors the attribution chain (a root resets it, a nested entry extends it).
+   */
+  ancestry(index) {
+    const indices = [];
+    for (let i = index; i !== null; i = this.functions[i].parent) {
+      indices.push(i);
+    }
+    return indices;
+  }
+
   /** Paper p. 8: +1 for each function in a recursion cycle, direct or indirect. */
   scoreRecursion() {
     const count = this.functions.length;
@@ -888,7 +902,7 @@ export class Walker {
     for (let i = 0; i < count; i++) {
       const cycleCall = callsFrom[i].find((call) => component[call.target] === component[i]);
       if (cycleCall) {
-        for (const index of this.chains[i]) {
+        for (const index of this.ancestry(i)) {
           this.functions[index].increments.push({ construct: "recursion", amount: 1, nesting: 0, loc: cycleCall.loc });
           this.functions[index].score += 1;
         }

@@ -24,6 +24,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const API_BASE = "https://sonarcloud.io/api";
@@ -52,8 +53,6 @@ export class RefreshError extends Error {
     this.exitCode = 2;
   }
 }
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // --- credential --------------------------------------------------------------
 
@@ -183,15 +182,23 @@ function globToken(pattern, index) {
   return { source: pattern[index].replace(/[.+^${}()|[\]\\]/g, "\\$&"), length: 1 };
 }
 
+const compiledGlobs = new Map();
+
+/** Compiled once per distinct pattern; the same few patterns are tested against every path. */
 export function globToRegExp(pattern) {
-  let source = "";
-  let index = 0;
-  while (index < pattern.length) {
-    const token = globToken(pattern, index);
-    source += token.source;
-    index += token.length;
+  let regExp = compiledGlobs.get(pattern);
+  if (regExp === undefined) {
+    let source = "";
+    let index = 0;
+    while (index < pattern.length) {
+      const token = globToken(pattern, index);
+      source += token.source;
+      index += token.length;
+    }
+    regExp = new RegExp(`^${source}$`);
+    compiledGlobs.set(pattern, regExp);
   }
-  return new RegExp(`^${source}$`);
+  return regExp;
 }
 
 /** See the glob subset documented at the top of this file. */
