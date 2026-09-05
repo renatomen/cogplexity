@@ -35,6 +35,40 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run pack:check
+      # The same exact-match calibration as ci.yml: a tag must not publish without it.
+      # A missing fixture fails here: the job must never go green without comparing.
+      - name: Read the fixture's commit and repository
+        id: fixture
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const file = "calibration/fixtures/tasknotes-gantt.json";
+            if (!fs.existsSync(file)) {
+              console.error(`calibration fixture missing: ${file} — run node scripts/refresh-fixture.mjs tasknotes-gantt --project-key renatomen_obsidian-gantt --repository renatomen/tasknotes-gantt --sources src`);
+              process.exit(1);
+            }
+            const { commitSha, repository } = JSON.parse(fs.readFileSync(file, "utf8"));
+            if (!/^[0-9a-f]{40}$/.test(commitSha)) throw new Error(`unexpected commitSha: ${commitSha}`);
+            if (repository !== "renatomen/tasknotes-gantt") throw new Error(`unexpected repository: ${repository} (the calibration corpus is renatomen/tasknotes-gantt)`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `commit=${commitSha}\nrepository=${repository}\n`);
+            console.log(`fixture pins ${repository} at ${commitSha}`);
+          '
+      - name: Clone the corpus at the fixture commit
+        env:
+          COMMIT: ${{ steps.fixture.outputs.commit }}
+          REPOSITORY: ${{ steps.fixture.outputs.repository }}
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/corpus"
+          cd "$RUNNER_TEMP/corpus"
+          git init -q
+          git remote add origin "https://github.com/$REPOSITORY.git"
+          git fetch --depth 1 origin "$COMMIT" || git fetch origin
+          git cat-file -e "$COMMIT^{commit}"
+      - name: Calibrate
+        env:
+          COGPLEXITY_CORPUS: ${{ runner.temp }}/corpus
+        run: npm run calibrate
       - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@^11.5.1
+        run: npm install -g --ignore-scripts npm@^11.5.1
       - run: npm publish --provenance --access public

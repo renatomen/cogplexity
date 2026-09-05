@@ -80,3 +80,55 @@ export function ternaryThenIterates(xs: number[], a: boolean, b: boolean): numbe
   });
   return n;
 }
+
+// A class field initialiser is scored into the enclosing function, so a ternary in one is
+// structural there: the sibling arrow field nests instead of being promoted.
+export function fieldTernary(flag: boolean): void {
+  class Local {
+    value = flag ? 1 : 2;
+    callback = (): void => {
+      if (flag) {
+        return;
+      }
+    };
+  }
+  void Local;
+}
+
+// A parameter default is scored at the function's own level, so a ternary there is structural too.
+export function defaultTernary(xs: number[], limit: number = xs.length > 1 ? 1 : 0): number[] {
+  return xs.map((x) => {
+    if (x > limit) {
+      return x;
+    }
+    return -x;
+  });
+}
+
+// A static block is a root of its own; one holding a structural statement nests its functions.
+export class Checked {
+  static enabled = false;
+  static {
+    if (Checked.enabled) {
+      Checked.enabled = false;
+    }
+    const checked = (): void => {
+      if (Checked.enabled) {
+        return;
+      }
+    };
+    checked();
+  }
+}
+
+// A static block with nothing structural of its own is declarative: its function is promoted.
+export class Unchecked {
+  static {
+    const unchecked = (flag: boolean): void => {
+      if (flag) {
+        return;
+      }
+    };
+    unchecked(true);
+  }
+}

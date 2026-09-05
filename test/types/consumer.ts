@@ -1,11 +1,12 @@
 // Consumer-style type check: both entry points must resolve through the package's own
 // `exports` map, and `./score` must need no ESLint types.
-import plugin, { rule, score, scoped } from "cogplexity";
-import type { RuleOptions, ScopedConfig } from "cogplexity";
+import plugin, { CONSTRUCTS, rule, score, scoped } from "cogplexity";
+import type { Construct, RuleOptions, ScopedConfig } from "cogplexity";
 import { score as scoreOnly } from "cogplexity/score";
 import type { ScoreResult } from "cogplexity/score";
 
 export const name: string = plugin.meta.name;
+export const first: Construct = CONSTRUCTS[0];
 export const fns: [typeof score, typeof scoreOnly] = [score, scoreOnly];
 export const sameRule: boolean = plugin.rules["cognitive-complexity"] === rule;
 export const description: string = rule.meta.docs.description;

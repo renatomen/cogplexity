@@ -63,7 +63,9 @@ import { score } from "cogplexity/score";
 const { functions, topLevel, template, total } = score(ast, sourceText, { scopeManager });
 ```
 
-`functions` holds one entry per function (`name`, `depth`, `parent`, `nesting` — the level its body starts at — `loc`, `nameLoc`, `score`, `increments`), `topLevel` the statements outside any function, `template` the Svelte template facet (Svelte roots only), and `total` the sum of the root functions and `topLevel`. Each increment is `{ construct, amount, nesting, loc }`, plus `operator` (`&&` or `||`) on a `logicalSequence`; a function's score includes everything nested inside it.
+`functions` holds one entry per function (`kind: "function"`, `name`, `depth`, `parent`, `nesting` — the level its body starts at — `loc`, `nameLoc`, `score`, `increments`), `topLevel` the statements outside any function (`kind: "topLevel"`), `template` the Svelte template facet (`kind: "template"`, Svelte roots only), and `total` the sum of the root functions and `topLevel`. Each increment is `{ construct, amount, nesting, loc }`, plus `operator` (`&&` or `||`) on a `logicalSequence`; a function's score includes everything nested inside it.
+
+`score()` is the path meant for machine consumption: structured increments with locations, not prose to parse — ESLint's JSON or SARIF output carries the same breakdown only as the message text.
 
 ## Options
 
@@ -119,9 +121,9 @@ The specification is the authority; SonarCloud is a cross-check. The calibration
 - **per-file totals** — `score().total` for every eligible file equals SonarCloud's `cognitive_complexity` file measure;
 - **per-function findings** — every function whose *own-body* score exceeds 15 has a SonarCloud S3776 issue on its name line with that score, and every S3776 issue corresponds to such a function. The own-body score is what SonarCloud reports per function: the function's increments with nested functions excluded and nesting counted from the function's own body. The rule reports a root's inclusive score instead (the paper's attribution), so the harness derives Sonar's quantity from the same increments rather than comparing the rule's number.
 
-The corpus is [`renatomen/tasknotes-gantt`](https://github.com/renatomen/tasknotes-gantt) (SonarCloud project key `renatomen_obsidian-gantt`), a public repository chosen so this package never depends on private code; the harness is corpus-agnostic and accepts any fixture with the same shape.
+The corpus is [`renatomen/tasknotes-gantt`](https://github.com/renatomen/tasknotes-gantt) (SonarCloud project key `renatomen_obsidian-gantt`), a public repository chosen so this package never depends on private code; the harness is corpus-agnostic and accepts any fixture with the same shape. The corpus identity is pinned: the calibration test fails (it does not skip) when the fixture's `repository` or `projectKey` differs from those values, and CI refuses to clone any other repository.
 
-**Fixture.** `calibration/fixtures/<corpus>.json` records `projectKey`, `repository`, the analysed `commitSha`, `capturedAt`, the `sonar` block that defines the eligible file set (`sources`, `testInclusions`, `exclusions`, `extensions`), `files` (path → total) and `issues` (`{ path, line, score }`). The harness reads every fixture path with `git show <commitSha>:<path>` from your clone, so a dirty working tree or a different checked-out branch never matters; a clone that lacks the commit fails as `corpus unavailable`, distinct from a mismatch. A fixture path absent at the commit, or an eligible file at the commit that the fixture lacks, fails naming the path.
+**Fixture.** `calibration/fixtures/<corpus>.json` records `projectKey`, `repository`, the analysed `commitSha`, `capturedAt`, the `sonar` block that defines the eligible file set (`sources`, `testInclusions`, `exclusions`, `extensions`), `files` (path → total) and `issues` (`{ path, line, score }`). The harness reads every fixture path with `git show <commitSha>:<path>` from your clone, so a dirty working tree or a different checked-out branch never matters; a clone that lacks the commit fails as `corpus unavailable`, distinct from a mismatch. A fixture path absent at the commit, or an eligible file at the commit that the fixture lacks, fails naming the path; a fixture that lists no files to compare fails too.
 
 **Run locally.**
 
@@ -129,7 +131,7 @@ The corpus is [`renatomen/tasknotes-gantt`](https://github.com/renatomen/tasknot
 COGPLEXITY_CORPUS=/path/to/tasknotes-gantt npm run calibrate
 ```
 
-With `COGPLEXITY_CORPUS` unset (as in a plain `npm test`), the corpus is reported as *skipped* with the reason — never as passed. The CI `calibration` job clones the corpus at the fixture's commit and runs the same command; it needs no credential.
+With `COGPLEXITY_CORPUS` unset (as in a plain `npm test`), the corpus is reported as *skipped* with the reason — never as passed. The CI `calibration` job clones the corpus at the fixture's commit and runs the same command; it needs no credential, and a missing fixture fails the job rather than skipping it. The publish workflow runs the same calibration for the tagged commit before `npm publish`.
 
 **Refresh the fixture.** Put a SonarCloud token in the `SONAR_TOKEN` environment variable or in a git-ignored `.env`, then:
 
@@ -141,7 +143,7 @@ The script aborts without touching the fixture on any API failure, replaces it a
 
 **Ledger.** A divergence from Sonar becomes a recorded entry in `calibration/ledger.json`, never a chase. Entries are `{ kind, match, reason, addedAt, expectedDelta?, operator? }`:
 
-- `kind: "clause"` — `match` is a `construct` identifier (`recursion`, `logicalSequence`, …); a `logicalSequence` entry may add `operator` (`&&` or `||`) to name only those runs. Every clause entry naming at least one increment in a file must together explain the file's whole delta (local minus Sonar): `recursion` alone explains a `+1` only where exactly one recursion increment exists, and a file with both a recursion increment and a `||` run is covered only when the ledger carries both entries and the delta is their sum. The same entries explain a per-function mismatch when the root's score minus their increments equals Sonar's score, or is at most 15 where Sonar reported no issue. A clause entry that covers no file fails the run as stale.
+- `kind: "clause"` — `match` is a `construct` identifier (`recursion`, `logicalSequence`, …); a `logicalSequence` entry may add `operator` (`&&` or `||`) to name only those runs. Every clause entry naming at least one increment in a file must together explain the file's whole delta (local minus Sonar): `recursion` alone explains a `+1` only where exactly one recursion increment exists, and a file with both a recursion increment and a `||` run is covered only when the ledger carries both entries and the delta is their sum. The same entries explain a per-function mismatch when the root's score minus their increments equals Sonar's score, or is at most 15 where Sonar reported no issue. A clause entry that covers no file fails the run as stale, and a file whose total already equals Sonar's although it contains a construct a clause entry records as uncounted fails as a contradiction (the message names the construct, e.g. `logicalSequence(||)`, and the amount present); files pinned by a `file` entry are exempt.
 - `kind: "file"` — `match` is the repo-relative path and `expectedDelta` (required) is **Sonar minus local**, i.e. the negation of the delta the report prints. The entry covers the file only when the observed delta equals `expectedDelta` exactly; a later regression on that file fails naming both deltas. A `file` entry also accepts every per-function mismatch on that path.
 
 Every entry carries a one-line `reason`.

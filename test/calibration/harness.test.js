@@ -343,6 +343,27 @@ test("a clause entry does not accept a per-function mismatch it does not explain
   assert.match(problemsText(wrongScore), /src\/a\.ts:1 f: sonar 14, local 17/);
 });
 
+test("a delta-0 file holding a || run under the || clause entry fails as a ledger contradiction", async () => {
+  const r = result([fn({ name: "f", line: 1, increments: [inc("if", 1, 2), OR(3)] })]);
+  const comparison = await run({ files: { "src/a.ts": 2 }, ledger: [orClause()], results: { "src/a.ts": r } });
+  assert.equal(comparison.ok, false);
+  assert.deepEqual(comparison.contradictions.map((c) => [c.path, c.amount]), [["src/a.ts", 1]]);
+  assert.match(problemsText(comparison), /^src\/a\.ts: sonar 2, local 2, but the ledger records logicalSequence\(\|\|\) as uncounted by Sonar \(1 present\)$/m);
+});
+
+test("a delta-0 file with no ledgered construct in it raises no contradiction", async () => {
+  const withOr = result([fn({ name: "g", line: 1, increments: [inc("if", 1, 2), OR(3)] })]);
+  const comparison = await run({ files: { "src/a.ts": 3, "src/b.ts": 1 }, ledger: [orClause()], results: { "src/a.ts": UNDER_BY_ONE, "src/b.ts": withOr } });
+  assert.equal(comparison.ok, true, problemsText(comparison));
+  assert.deepEqual(comparison.contradictions, []);
+});
+
+test("a delta-0 file pinned by a file entry is exempt from the contradiction check", async () => {
+  const r = result([fn({ name: "f", line: 1, increments: [inc("if", 1, 2), OR(3)] })]);
+  const comparison = await run({ files: { "src/a.ts": 2 }, ledger: [fileEntry("src/a.ts", 0)], results: { "src/a.ts": r } });
+  assert.deepEqual(comparison.contradictions, []);
+});
+
 test("coversByFile requires the exact path and the exact Sonar-minus-local delta", () => {
   const file = { path: "src/a.ts", sonar: 2, local: 3, delta: 1, result: UNDER_BY_ONE };
   assert.equal(coversByFile(fileEntry("src/a.ts", -1), file), true);
@@ -407,6 +428,20 @@ test("a non-eligible file absent from the fixture is ignored", async () => {
   assert.deepEqual(comparison.droppedPaths, []);
 });
 
+test("a fixture listing no file fails rather than calibrating an empty corpus", async () => {
+  const comparison = await run({ files: {}, results: {} });
+  assert.equal(comparison.ok, false);
+  assert.equal(comparison.summary.files, 0);
+  assert.deepEqual(comparison.problems, ["fixture lists no files to compare"]);
+});
+
+test("a fixture whose every path is absent at the commit also fails as listing no file to compare", async () => {
+  const comparison = await run({ files: { "src/gone.ts": 3 }, results: {}, listed: [] });
+  assert.equal(comparison.ok, false);
+  assert.match(problemsText(comparison), /^fixture lists no files to compare$/m);
+  assert.match(problemsText(comparison), /src\/gone\.ts: fixture path not found at the corpus commit/);
+});
+
 test("the fixture's recorded extension list narrows eligibility when it is shorter than the script's default", async () => {
   const narrow = { ...fixture({ "src/a.ts": 3 }), sonar: { ...SONAR, extensions: [".ts"] } };
   const comparison = await compareFixture({ fixture: narrow, ledger: [], scoreFile: () => UNDER_BY_ONE, listFiles: () => ["src/a.ts", "src/legacy.js"] });
@@ -454,6 +489,9 @@ const CORPUS_FILES = {
   "src/a.test.ts": "export const skipped = () => { if (a) { if (b) {} } };\n",
 };
 const SYNTHETIC_SONAR = { sources: ["src"], testInclusions: ["**/*.test.ts"], exclusions: [], extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs"] };
+// The identity calibrate.test.js pins for the tasknotes-gantt corpus; metadata only, the
+// files still come from the throwaway repository COGPLEXITY_CORPUS names.
+const CORPUS_IDENTITY = { projectKey: "renatomen_obsidian-gantt", repository: "renatomen/tasknotes-gantt" };
 
 function tempDir(prefix) {
   return mkdtempSync(path.join(tmpdir(), `cogplexity-${prefix}-`));
@@ -493,7 +531,7 @@ function syntheticFixture(sha, sources) {
       if (fn.parent === null && fn.score > THRESHOLD) issues.push({ path: filePath, line: fn.nameLoc.start.line, score: fn.score });
     }
   }
-  return { projectKey: "synthetic", repository: "example/synthetic", commitSha: sha, capturedAt: ADDED, sonar: SYNTHETIC_SONAR, files, issues };
+  return { ...CORPUS_IDENTITY, commitSha: sha, capturedAt: ADDED, sonar: SYNTHETIC_SONAR, files, issues };
 }
 
 /** Writes a fixture dir and ledger for the child process; returns the env overrides. */
@@ -531,6 +569,19 @@ test("with a corpus but no fixture the calibration test is skipped naming the re
   assert.equal(status, 0);
   assert.match(output, /# skipped 1/);
   assert.match(output, /# SKIP no fixture captured yet; run `node scripts\/refresh-fixture\.mjs tasknotes-gantt/);
+});
+
+test("a fixture naming another repository fails as an identity mismatch before scoring", (t) => {
+  const repo = corpusRepo(CORPUS_FILES);
+  const fixture = { ...syntheticFixture(repo.sha, { "src/a.ts": HEFTY, "src/b.ts": COUNT }), repository: "example/other" };
+  const inputs = calibrationInputs(fixture);
+  t.after(() => removeDir(repo.dir));
+  t.after(() => removeDir(inputs.dir));
+  const { status, output } = runCalibrate({ COGPLEXITY_CORPUS: repo.dir, ...inputs.env });
+  assert.equal(status, 1);
+  assert.match(output, /# fail 1/);
+  assert.ok(output.includes("fixture identifies example/other (project key renatomen_obsidian-gantt) but the corpus is renatomen/tasknotes-gantt (project key renatomen_obsidian-gantt)"), output);
+  assert.doesNotMatch(output, /diverges from SonarCloud/);
 });
 
 test("a clone lacking the fixture commit fails as corpus unavailable before scoring", (t) => {

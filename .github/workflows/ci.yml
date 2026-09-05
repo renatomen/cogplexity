@@ -93,6 +93,7 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci --ignore-scripts
+      # A missing fixture fails here: the job must never go green without comparing.
       - name: Read the fixture's commit and repository
         id: fixture
         run: |
@@ -100,17 +101,16 @@ jobs:
             const fs = require("node:fs");
             const file = "calibration/fixtures/tasknotes-gantt.json";
             if (!fs.existsSync(file)) {
-              console.log("no calibration fixture captured yet — skipped");
-              process.exit(0);
+              console.error(`calibration fixture missing: ${file} — run node scripts/refresh-fixture.mjs tasknotes-gantt --project-key renatomen_obsidian-gantt --repository renatomen/tasknotes-gantt --sources src`);
+              process.exit(1);
             }
             const { commitSha, repository } = JSON.parse(fs.readFileSync(file, "utf8"));
             if (!/^[0-9a-f]{40}$/.test(commitSha)) throw new Error(`unexpected commitSha: ${commitSha}`);
-            if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error(`unexpected repository: ${repository}`);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `present=true\ncommit=${commitSha}\nrepository=${repository}\n`);
+            if (repository !== "renatomen/tasknotes-gantt") throw new Error(`unexpected repository: ${repository} (the calibration corpus is renatomen/tasknotes-gantt)`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `commit=${commitSha}\nrepository=${repository}\n`);
             console.log(`fixture pins ${repository} at ${commitSha}`);
           '
       - name: Clone the corpus at the fixture commit
-        if: steps.fixture.outputs.present == 'true'
         env:
           COMMIT: ${{ steps.fixture.outputs.commit }}
           REPOSITORY: ${{ steps.fixture.outputs.repository }}
@@ -123,7 +123,6 @@ jobs:
           git fetch --depth 1 origin "$COMMIT" || git fetch origin
           git cat-file -e "$COMMIT^{commit}"
       - name: Calibrate
-        if: steps.fixture.outputs.present == 'true'
         env:
           COGPLEXITY_CORPUS: ${{ runner.temp }}/corpus
         run: npm run calibrate

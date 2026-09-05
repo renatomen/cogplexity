@@ -28,9 +28,16 @@
 //     staleEntries: LedgerEntry[],       // entries that covered nothing
 //     invalidEntries: [{ entry, reason }],
 //     fileEntryFailures: [{ path, expectedDelta, observedDelta }],
+//     contradictions: [{ path, sonar, local, entry, amount }], // delta-0 files holding a ledgered construct
 //     presence: { recursion: boolean, declarativeOuter: boolean },
 //     summary: { files, issues, reported, ledgerApplied },
 //   }
+//
+// A comparison that scored no file at all is itself a problem (`fixture lists no files to
+// compare`): an empty fixture must never calibrate. A `contradiction` is a file whose total
+// agrees with Sonar although a clause entry names increments in it — either Sonar has started
+// counting that construct or the entry is wrong — so it fails the run too; files pinned by a
+// `file` entry are exempt, that entry already fixing their delta.
 //
 // Per-function findings compare what SonarCloud reports per function (S3776): the score of
 // the function's own body — nested functions excluded, nesting counted from that body — not
@@ -279,13 +286,24 @@ function fileEntryLine(f) {
   return `${f.path}: ledger file entry expects delta ${f.expectedDelta} (Sonar minus local) but observed ${f.observedDelta}`;
 }
 
+/** How a clause entry names its construct in a report line: `logicalSequence(||)` when it carries an operator. */
+function clauseLabel(entry) {
+  return entry.operator === undefined ? entry.match : `${entry.match}(${entry.operator})`;
+}
+
+function contradictionLine(c) {
+  return `${c.path}: sonar ${c.sonar}, local ${c.local}, but the ledger records ${clauseLabel(c.entry)} as uncounted by Sonar (${c.amount} present)`;
+}
+
 function collectProblems(c) {
   return [
+    ...(c.summary.files === 0 ? ["fixture lists no files to compare"] : []),
     ...c.invalidEntries.map((i) => i.reason),
     ...c.missingPaths.map((p) => `${p}: fixture path not found at the corpus commit`),
     ...c.droppedPaths.map((p) => `${p}: eligible at the corpus commit but absent from the fixture (the refresh dropped it)`),
     ...c.uncovered.map(fileLine),
     ...c.fileEntryFailures.map(fileEntryLine),
+    ...c.contradictions.map(contradictionLine),
     ...c.mismatches.functions.filter((m) => m.coveredBy === null).map(functionLine),
     ...c.staleEntries.map(staleLine),
   ];
@@ -320,6 +338,24 @@ function applyLedger(entries, files) {
   const mismatches = files.filter((file) => file.delta !== 0).map((file) => ({ ...file, coveredBy: fileCoverage(entries, file) }));
   for (const mismatch of mismatches) for (const entry of mismatch.coveredBy ?? []) used.add(entry);
   return { mismatches, used };
+}
+
+/**
+ * Files whose total agrees with Sonar while a clause entry names increments in them: a
+ * construct the ledger records as uncounted by Sonar cannot be present in a file Sonar
+ * scored the same way. Files with a `file` entry are exempt.
+ */
+function ledgerContradictions(entries, files) {
+  const clauses = entries.filter((entry) => entry.kind === "clause");
+  const contradictions = [];
+  for (const file of files) {
+    if (file.delta !== 0 || fileEntryFor(entries, file.path) !== null) continue;
+    for (const entry of clauses) {
+      const amount = clauseAmount(entry, file.result);
+      if (amount !== 0) contradictions.push({ path: file.path, sonar: file.sonar, local: file.local, entry, amount });
+    }
+  }
+  return contradictions;
 }
 
 function fileEntryFailure(entry, files) {
@@ -390,6 +426,7 @@ export async function compareFixture({ fixture, ledger, scoreFile, listFiles }) 
     staleEntries,
     invalidEntries,
     fileEntryFailures,
+    contradictions: ledgerContradictions(entries, files),
     presence: presenceOf(files),
     summary: summarize(files, fixture, used, functions),
   };

@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import plugin, { score } from "../src/index.js";
+import plugin, { CONSTRUCTS, score } from "../src/index.js";
+import { CONSTRUCTS as CONSTRUCTS_FROM_SCORE } from "../src/score.js";
 
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 
@@ -23,4 +24,8 @@ test("the package has no build or install lifecycle scripts", () => {
 
 test("score is exported from the root entry", () => {
   assert.equal(typeof score, "function");
+});
+
+test("CONSTRUCTS is exported from the root entry and is score.js's frozen array", () => {
+  assert.equal(CONSTRUCTS, CONSTRUCTS_FROM_SCORE);
 });

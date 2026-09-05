@@ -66,8 +66,16 @@ const LOOP_TYPES = new Set(["ForStatement", "ForInStatement", "ForOfStatement", 
 /** Nodes subject to a structural or hybrid increment (Appendix B §1): the ones whose presence at a function's top level makes it non-declarative (Appendix A). */
 const STRUCTURE_TYPES = new Set(["IfStatement", "ConditionalExpression", "SwitchStatement", "CatchClause", ...LOOP_TYPES]);
 
-/** Nodes the walker scores as function-like entries of their own, so their contents are "nested inside a sub-function" for Appendix A. */
-const NESTED_SCOPE_TYPES = new Set([...FUNCTION_TYPES, "StaticBlock", "PropertyDefinition"]);
+/**
+ * Nodes the walker scores as function-like entries of their own, so their contents are "nested
+ * inside a sub-function" for Appendix A. A class field is not one: only a function-valued field
+ * opens an entry (`visitValue`), and that function node is the boundary; any other field value
+ * is scored into the enclosing function.
+ */
+const NESTED_SCOPE_TYPES = new Set([...FUNCTION_TYPES, "StaticBlock"]);
+
+/** Class members `visitClassMember` handles: a computed key and a non-function value are scored into the enclosing function. */
+const CLASS_MEMBER_TYPES = new Set(["MethodDefinition", "PropertyDefinition", "AccessorProperty"]);
 
 /** Statement-level containers searched for hoisted `var` declarations. */
 const STATEMENT_CONTAINERS = new Set([
@@ -260,11 +268,15 @@ function targetName(node) {
  * fundamental increments.
  */
 function isDeclarative(fn) {
-  return !containsStructure(fn.body);
+  // Everything `visitFunctionContents` scores at the function's own level: its parameters
+  // (a default value may hold a ternary) and its body, which is a statement list for a static block.
+  const body = Array.isArray(fn.body) ? fn.body : [fn.body];
+  return ![...(fn.params ?? []), ...body].some(containsStructure);
 }
 
+/** Whether the walker would emit a structural increment for `node` outside any nested scope; mirrors `visit`. */
 function containsStructure(node) {
-  if (!isNode(node)) {
+  if (!isNode(node) || NOT_WALKED.has(node.type)) {
     return false;
   }
   if (STRUCTURE_TYPES.has(node.type)) {
@@ -272,6 +284,9 @@ function containsStructure(node) {
   }
   if (NESTED_SCOPE_TYPES.has(node.type)) {
     return false;
+  }
+  if (CLASS_MEMBER_TYPES.has(node.type)) {
+    return (Boolean(node.computed) && containsStructure(node.key)) || containsStructure(node.value);
   }
   for (const child of children(node)) {
     if (containsStructure(child)) {
@@ -821,14 +836,17 @@ export class Walker {
   /**
    * Record a call for the recursion pass. The call is an edge from every function it accrues
    * to (the attribution chain), so a function whose callback calls it back is in a cycle, while
-   * a promoted function's calls never count against its declarative container.
+   * a promoted function's calls never count against its declarative container. `owner` is the
+   * function the call is written in, so `scoreRecursion` can locate a root's increment on its
+   * own call rather than on one made by a nested function.
    */
   visitCall(node, nesting) {
     const callee = unwrap(node.callee);
     const target = this.resolveCallee(callee);
     if (target && this.frames.length > 0) {
       const token = callee.type === "Identifier" ? callee : callee.property;
-      this.calls.push({ from: this.ancestry(this.frames.at(-1).index), target, loc: this.copyLoc(token) });
+      const owner = this.frames.at(-1).index;
+      this.calls.push({ from: this.ancestry(owner), owner, target, loc: this.copyLoc(token) });
     }
     this.visitChildren(node, nesting);
   }
@@ -883,8 +901,12 @@ export class Walker {
     return indices;
   }
 
-  /** Paper p. 8: +1 for each function in a recursion cycle, direct or indirect. */
-  scoreRecursion() {
+  /**
+   * The call graph over function entries, in source order: `edges[i]` are the targets reachable
+   * from entry `i`, and `callsFrom[i]` the calls behind them, each flagged `direct` when entry
+   * `i` is the function the call is written in.
+   */
+  callGraph() {
     const count = this.functions.length;
     const edges = Array.from({ length: count }, () => []);
     const callsFrom = Array.from({ length: count }, () => []);
@@ -895,12 +917,24 @@ export class Walker {
       }
       for (const source of call.from) {
         edges[source].push(target);
-        callsFrom[source].push({ target, loc: call.loc });
+        callsFrom[source].push({ target, loc: call.loc, direct: source === call.owner });
       }
     }
-    const component = stronglyConnected(count, edges);
-    for (let i = 0; i < count; i++) {
-      const cycleCall = callsFrom[i].find((call) => component[call.target] === component[i]);
+    return { edges, callsFrom };
+  }
+
+  /**
+   * Paper p. 8: +1 for each function in a recursion cycle, direct or indirect. The increment is
+   * located on the function's own call that participates in the cycle when it has one, and only
+   * otherwise on the nested function's call that put it there (a root also receives its nested
+   * functions' increments, so this keeps the two at distinct locations).
+   */
+  scoreRecursion() {
+    const { edges, callsFrom } = this.callGraph();
+    const component = stronglyConnected(this.functions.length, edges);
+    for (let i = 0; i < this.functions.length; i++) {
+      const inCycle = (call) => component[call.target] === component[i];
+      const cycleCall = callsFrom[i].find((call) => call.direct && inCycle(call)) ?? callsFrom[i].find(inCycle);
       if (cycleCall) {
         for (const index of this.ancestry(i)) {
           this.functions[index].increments.push({ construct: "recursion", amount: 1, nesting: 0, loc: cycleCall.loc });

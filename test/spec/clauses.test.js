@@ -223,6 +223,14 @@ test("sequences in a variable initialiser and in a call argument each score 1", 
 
 // --- AE4: recursion, with and without a scope manager ------------------------------------
 
+/** The entry whose owner starts on the line of the nth occurrence of `needle` (members share names across classes). */
+function entryOnLineOf(result, text, needle, nth = 0) {
+  const [line] = at(text, needle, nth);
+  const entry = result.functions.find((fn) => fn.loc.start.line === line);
+  assert.ok(entry, `no function starting on the line of "${needle}"`);
+  return entry;
+}
+
 for (const mode of RESOLUTION_MODES) {
   test(`AE4 [${mode}]: a function calling itself scores +1 located on the callee token`, () => {
     const { text, result } = scoreFixture("recursion.ts", mode);
@@ -330,6 +338,55 @@ for (const mode of RESOLUTION_MODES) {
     const result = scoreSource("function container(): void { function promoted(): void { container(); } }", mode);
     assert.equal(byName(result, "container").score, 0);
     assert.equal(byName(result, "promoted").score, 0);
+  });
+
+  test(`AE4 [${mode}]: a root in a cycle through its nested helper locates its own increment on its direct call and the helper's on the nested call`, () => {
+    const { text, result } = scoreFixture("recursion.ts", mode);
+    const walk = byName(result, "walk");
+    const helper = byName(result, "visitChildren");
+    assert.equal(helper.parent, result.functions.indexOf(walk));
+    assert.deepEqual(shape(walk), [
+      ["if", 1, 0],
+      ["loop", 2, 1],
+      ["recursion", 1, 0],
+      ["recursion", 1, 0],
+    ]);
+    assert.deepEqual(starts(walk), [at(text, "if (!node)"), at(text, "for (const child"), at(text, "walk(child)"), at(text, "visitChildren(node)")]);
+    assert.deepEqual(shape(helper), [
+      ["loop", 2, 1],
+      ["recursion", 1, 0],
+    ]);
+    assert.deepEqual(starts(helper), [at(text, "for (const child"), at(text, "walk(child)")]);
+  });
+
+  test(`AE4 [${mode}]: this.run() resolves to the method run, never to a same-named getter or setter, and this.constructor() closes no cycle`, () => {
+    const { text, result } = scoreFixture("recursion.ts", mode);
+    const method = entryOnLineOf(result, text, "  run(): void {");
+    assert.deepEqual(shape(method), [
+      ["if", 1, 0],
+      ["recursion", 1, 0],
+    ]);
+    const [line, column] = at(text, "this.run();");
+    assert.deepEqual(starts(method)[1], [line, column + "this.".length]);
+    for (const needle of ["get run(", "set run(", "constructor()", "  rebuild()"]) {
+      assert.equal(entryOnLineOf(result, text, needle).score, 0, needle);
+    }
+  });
+
+  test(`AE4 [${mode}]: static methods calling each other through this are a cycle; same-named instance members of another class are not`, () => {
+    const { text, result } = scoreFixture("recursion.ts", mode);
+    for (const needle of ["static first(", "static second("]) {
+      assert.deepEqual(shape(entryOnLineOf(result, text, needle)), [["recursion", 1, 0]], needle);
+    }
+    for (const needle of ["  first(n", "  second(n"]) {
+      assert.equal(entryOnLineOf(result, text, needle).score, 0, needle);
+    }
+  });
+
+  test(`AE4 [${mode}]: this.<name>() from an instance member does not reach a static member of that name, nor the reverse`, () => {
+    const { text, result } = scoreFixture("recursion.ts", mode);
+    assert.equal(entryOnLineOf(result, text, "static go(").score, 0);
+    assert.equal(entryOnLineOf(result, text, "  step()").score, 0);
   });
 }
 
@@ -502,8 +559,58 @@ test("Appendix A: only the outer function is a container — a promoted method n
   assert.equal(lambda.depth, 1);
 });
 
+test("Appendix A: a ternary in a class field initialiser is structural — the sibling arrow field nests and its if scores +2", () => {
+  const { result } = scoreFixture("declarative.ts");
+  const outer = byName(result, "fieldTernary");
+  assert.equal(outer.score, 3);
+  assert.deepEqual(shape(outer), [
+    ["ternary", 1, 0],
+    ["if", 2, 1],
+  ]);
+  const callback = byName(result, "callback");
+  assert.equal(callback.parent, result.functions.indexOf(outer));
+  assert.equal(callback.depth, 1);
+  assert.deepEqual(shape(callback), [["if", 2, 1]]);
+});
+
+test("Appendix A: a ternary in a parameter default is structural — the map callback nests and its if scores +2", () => {
+  const { result } = scoreFixture("declarative.ts");
+  const outer = byName(result, "defaultTernary");
+  assert.equal(outer.score, 3);
+  assert.deepEqual(shape(outer), [
+    ["ternary", 1, 0],
+    ["if", 2, 1],
+  ]);
+  const callback = result.functions[result.functions.indexOf(outer) + 1];
+  assert.equal(callback.parent, result.functions.indexOf(outer));
+  assert.deepEqual(shape(callback), [["if", 2, 1]]);
+});
+
+test("Appendix A: a static block with an if of its own is not declarative — its arrow nests and its if scores +2", () => {
+  const { text, result } = scoreFixture("declarative.ts");
+  const block = entryOnLineOf(result, text, "static {");
+  assert.equal(block.parent, null);
+  assert.deepEqual(shape(block), [
+    ["if", 1, 0],
+    ["if", 2, 1],
+  ]);
+  const checked = byName(result, "checked");
+  assert.equal(checked.parent, result.functions.indexOf(block));
+  assert.deepEqual(shape(checked), [["if", 2, 1]]);
+});
+
+test("Appendix A: a static block with only a nested arrow stays declarative — the arrow is promoted and its if scores 1", () => {
+  const { text, result } = scoreFixture("declarative.ts");
+  const block = entryOnLineOf(result, text, "static {", 1);
+  assert.equal(block.score, 0);
+  const unchecked = byName(result, "unchecked");
+  assert.equal(unchecked.parent, null);
+  assert.equal(unchecked.depth, 0);
+  assert.deepEqual(shape(unchecked), [["if", 1, 0]]);
+});
+
 test("Appendix A: the file total counts each promoted root once", () => {
-  assert.equal(scoreFixture("declarative.ts").result.total, 1 + 3 + 4 + 1 + 1 + 2 + 2 + 3);
+  assert.equal(scoreFixture("declarative.ts").result.total, 1 + 3 + 4 + 1 + 1 + 2 + 2 + 3 + 3 + 3 + 3 + 1);
 });
 
 // --- increment fields ------------------------------------------------------------------------

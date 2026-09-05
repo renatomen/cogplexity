@@ -19,10 +19,16 @@ const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const FIXTURE_DIR = process.env.COGPLEXITY_FIXTURE_DIR ?? path.join(ROOT_DIR, "calibration", "fixtures");
 const LEDGER_PATH = process.env.COGPLEXITY_LEDGER ?? path.join(ROOT_DIR, "calibration", "ledger.json");
 
-/** Each corpus with the refresh command that captures its fixture. */
+/**
+ * Each corpus with its identity and the refresh command that captures its fixture. The
+ * identity is asserted against the fixture so a rewritten fixture cannot calibrate against
+ * another repository or SonarCloud project.
+ */
 const CORPORA = [
   {
     name: "tasknotes-gantt",
+    repository: "renatomen/tasknotes-gantt",
+    projectKey: "renatomen_obsidian-gantt",
     refresh:
       "node scripts/refresh-fixture.mjs tasknotes-gantt --project-key renatomen_obsidian-gantt " +
       "--repository renatomen/tasknotes-gantt --sources src",
@@ -38,6 +44,18 @@ function corpusClone() {
   return clone && clone.trim() !== "" ? path.resolve(clone) : null;
 }
 
+function identity(source) {
+  return `${source.repository} (project key ${source.projectKey})`;
+}
+
+/** Fails, never skips, when the fixture names another repository or SonarCloud project than the corpus. */
+function assertFixtureIdentity(corpus, fixture) {
+  assert.ok(
+    fixture.repository === corpus.repository && fixture.projectKey === corpus.projectKey,
+    `${corpus.name}: fixture identifies ${identity(fixture)} but the corpus is ${identity(corpus)}`,
+  );
+}
+
 async function calibrate(t, corpus) {
   const clone = corpusClone();
   if (clone === null) {
@@ -48,6 +66,7 @@ async function calibrate(t, corpus) {
     return t.skip(`no fixture captured yet; run \`${corpus.refresh}\` with a SonarCloud credential`);
   }
   const fixture = readJson(fixturePath);
+  assertFixtureIdentity(corpus, fixture);
   const ledger = existsSync(LEDGER_PATH) ? readJson(LEDGER_PATH) : [];
   await assertCommitPresent(clone, fixture.commitSha);
 

@@ -25,6 +25,10 @@ function packedPaths() {
     encoding: "utf8",
     shell: process.platform === "win32",
   });
+  if (result.error) {
+    console.error(result.error.message);
+    process.exit(2);
+  }
   if (result.status !== 0) {
     console.error(result.stderr || result.stdout);
     process.exit(2);
