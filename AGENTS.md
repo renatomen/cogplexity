@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Standing instructions for anyone — human or agent — working in this repository. `STRATEGY.md` is the product authority; `docs/plans/` holds the implementation plan.
+Standing instructions for anyone — human or agent — working in this repository. `STRATEGY.md` is the product authority; `docs/plans/` holds the implementation plan. `docs/solutions/` holds documented solutions to past problems (bugs, best practices, workflow patterns), organized by category with YAML frontmatter (`module`, `tags`, `problem_type`), relevant when implementing or debugging in documented areas; `CONCEPTS.md` is the shared domain vocabulary (entities, named processes, status concepts), relevant when orienting to the codebase.
 
 ## What this package is
 
@@ -31,7 +31,7 @@ Never read, copy, adapt, or consult `eslint-plugin-sonarjs` source of any versio
 
 ## Release governance
 
-- Tags are bare semver (`1.0.0`) and must match `package.json`'s version. A repository tag ruleset forbids creating semver tags outside the release process and forbids moving or deleting them.
+- Tags are bare semver (`1.0.0`) and must match `package.json`'s version. A repository tag ruleset forbids moving or deleting semver tags; creating one is limited to whoever can push, and pushing one is the release process.
 - `publish.yml` runs in the `release` environment (required reviewer) and re-runs lint, type check, tests and the pack check before `npm publish --provenance`.
 - Consumers installing from the git URL should commit a lockfile and use `npm ci`; the lockfile pins the resolved commit while a tag is mutable.
 
