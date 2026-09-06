@@ -1,6 +1,6 @@
 {
   "name": "cogplexity",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Licence-clean ESLint rule for cognitive complexity (G. Ann Campbell's specification) on TypeScript, JavaScript and Svelte. One rule, zero runtime dependencies, no build step.",
   "keywords": [
     "eslint",
